@@ -10,7 +10,7 @@ In this implementation a [pinhole camera model](https://en.wikipedia.org/wiki/Pi
 
 
 ## Example
-![Left Camera](https://raw.githubusercontent.com/bailus/tsai-calibration/master/output/output-0.png) ![Right Camera](https://raw.githubusercontent.com/bailus/tsai-calibration/master/output/output-1.png)
+![Left Camera](output/output-0.png) ![Right Camera](output/output-1.png)
 
 |                                       |    Left |   Right |  Stereo  | Reference |
 |---------------------------------------|---------|---------|----------|-----------|

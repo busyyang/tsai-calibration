@@ -35,7 +35,7 @@ def matrixToEuler(M):
     return heading, attitude, bank
 
 
-def eulerToMatrix(( heading, attitude, bank )):
+def eulerToMatrix(heading, attitude, bank):
     # Convert euler angles back to matrix
     sa, ca = sin(attitude), cos(attitude)
     sb, cb = sin(bank), cos(bank)
@@ -62,8 +62,8 @@ def eulerToMatrix(( heading, attitude, bank )):
 
 # Given an almost-orthonormal matrix M, returns the closest orthonormal (ie. rotation) matrix
 def makeOrthonormal(M):
-    return eulerToMatrix(matrixToEuler(M))
+    return eulerToMatrix(*matrixToEuler(M))
 
 
 def clamp(value, low=0.0, high=1.0):
-	return min(max(value, low), high)
+    return min(max(value, low), high)
