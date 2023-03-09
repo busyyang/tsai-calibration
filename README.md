@@ -1,5 +1,10 @@
 # Tsai Calibration
 
+This is a python 3 implementation for stereo cameras calibration and distortion correction by Tsai with distortion method. It is forked from [bailus/tsai-calibration](https://github.com/busyyang/tsai-calibration), which is implemented by python 2.
+    --- by Busy Yang
+
+Here is the **original readme** from [bailus/tsai-calibration](https://github.com/busyyang/tsai-calibration): 
+
 [Samuel Bailey](http://bailey.geek.nz) <[sam@bailey.geek.nz](mailto:sam@bailey.geek.nz)>
 
 
@@ -33,9 +38,12 @@ The resulting algorithm is much faster than the traditional methods used in phot
 
 
 ## Requires
- * [Python 2.x](https://www.python.org/)
+
+ * Python 3.5+
    * [NumPy](http://www.numpy.org/) (Math library)
    * [Matplotlib](https://matplotlib.org/) (2D/3D plotting library)
+
+For python 2, please visit [bailus/tsai-calibration](https://github.com/busyyang/tsai-calibration).
 
 
 ## Command Line
