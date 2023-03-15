@@ -1,0 +1,8 @@
+
+{
+"images": [ "carm_7th_s7st1_2-1.jpg", "carm_7th_s7st1_2-1.jpg" ],
+"resolution": [ 1024, 1024 ],
+"pixelSize": [ 0.209, 0.209 ],
+"points": "points.csv",
+"label": "Siemens Carm"
+}

@@ -114,7 +114,7 @@ def openFolders(settings):
 
 
 def main():
-    """
+
     settings = {
         'camera': 'Siemens Carm',
         'yOffset': 0.0,
@@ -129,12 +129,11 @@ def main():
         'camera': 'GoPro Hero 3+ Stereo',
         'yOffset': 0.0,
         'minLowDistortionPoints': 16,
-        'maxLowDistortionPoints': 18,
         'numHighDistortionPoints': 8,
         'passes': 8,
         'folders': ['data/3d/shoot1'],
         'outputFilename': 'output/output.pdf'
-    }
+    }"""
     openFolders(settings)
 
 
