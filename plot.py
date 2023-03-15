@@ -25,7 +25,7 @@ def plotPoints(points, image, title=''):
     ax.plot(x, y, 'rx', markersize=markersize / math.sqrt(2), label='actual')
 
     px, py = zip(*map(lambda point: point.projectedPixel[:2], points))
-    ax.plot(px, py, 'k+', markersize=markersize, label='projected')
+    ax.plot(px, py, 'bx', markersize=markersize, label='projected')
 
     ux, uy = zip(*map(lambda point: point.distortedPixel[:2], points))
     ax.plot(ux, uy, 'k+', markersize=markersize * 2, label='distorted')

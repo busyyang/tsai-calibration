@@ -10,21 +10,21 @@ from math import *
 import numpy as np
 
 
-def euclideanDistance2d(x): #euclidean distance from x to (0,0)
-    return sqrt((x[0]*x[0]) + (x[1]*x[1]))
+def euclideanDistance2d(x):  # euclidean distance from x to (0,0)
+    return sqrt((x[0] * x[0]) + (x[1] * x[1]))
 
 
-def matchingSigns(x, y): #returns true if x and y are both negative or both non-negative
+def matchingSigns(x, y):  # returns true if x and y are both negative or both non-negative
     return (x < 0.0 and y < 0.0) or (x >= 0.0 and y >= 0.0)
-    
 
-def rotationToHomogeneous(r): #rotation matrix to homogeneous transformation
+
+def rotationToHomogeneous(r):  # rotation matrix to homogeneous transformation
     q = np.transpose(np.array([r[0], r[1], r[2], np.zeros(3)], np.float64))
-    return np.transpose(np.array([ q[0], q[1], q[2], [ 0.0, 0.0, 0.0, 1.0 ] ], np.float64))
+    return np.transpose(np.array([q[0], q[1], q[2], [0.0, 0.0, 0.0, 1.0]], np.float64))
 
 
-def translationToHomogeneous(t): #translation vector to homogeneous transformation
-    tt = np.transpose(np.array([ np.zeros(4), np.zeros(4), np.zeros(4), [ t[0], t[1], t[2], 0.0 ] ], np.float64))
+def translationToHomogeneous(t):  # translation vector to homogeneous transformation
+    tt = np.transpose(np.array([np.zeros(4), np.zeros(4), np.zeros(4), [t[0], t[1], t[2], 0.0]], np.float64))
     return tt + np.identity(4)
 
 
@@ -43,19 +43,19 @@ def eulerToMatrix(heading, attitude, bank):
 
     return [
         [
-            ch*ca,
-            (-ch*sa*cb) + (sh*sb),
-            (ch*sa*sb) + (sh*cb)
+            ch * ca,
+            (-ch * sa * cb) + (sh * sb),
+            (ch * sa * sb) + (sh * cb)
         ],
         [
             sa,
-            ca*cb,
-            -ca*sb
+            ca * cb,
+            -ca * sb
         ],
         [
-            -sh*ca,
-            (sh*sa*cb) + (ch*sb),
-            (-sh*sa*sb) + (ch*cb)
+            -sh * ca,
+            (sh * sa * cb) + (ch * sb),
+            (-sh * sa * sb) + (ch * cb)
         ]
     ]
 
