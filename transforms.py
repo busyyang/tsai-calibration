@@ -60,7 +60,7 @@ def distortPoints(points, pixelSize, resolution, kappa):
         ru2 = (u[0] * u[0]) + (u[1] * u[1])
 
         obj = lambda x: (x * ((1 + kappa * x) ** 2) - ru2) ** 2
-        res = minimize(obj, np.array([ru2]), method='Nelder-Mead')
+        res = minimize(obj, np.array([ru2]), method='Powell')
         rd2 = res.x[0]
 
         correction = 1.0 / (1.0 + (kappa * rd2))

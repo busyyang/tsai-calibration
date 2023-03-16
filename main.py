@@ -119,7 +119,7 @@ def main():
         'camera': 'Siemens Carm',
         'yOffset': 0.0,
         'minLowDistortionPoints': 16,
-        'numHighDistortionPoints': 20,
+        'numHighDistortionPoints': 60,
         'passes': 8,
         'folders': ['data/3d/shoot2'],
         'outputFilename': 'data/3d/shoot2/output.pdf'
@@ -133,7 +133,8 @@ def main():
         'passes': 8,
         'folders': ['data/3d/shoot1'],
         'outputFilename': 'output/output.pdf'
-    }"""
+    }
+    """
     openFolders(settings)
 
 

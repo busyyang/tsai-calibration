@@ -14,6 +14,8 @@ from __future__ import print_function
 
 import math
 
+import numpy as np
+
 from transforms import *
 from calibration import calibrate
 
@@ -92,18 +94,54 @@ def calibrateDistorted(settings, points, image):
         print("kappe = ", kappa)
         return e
 
-    # re-calibrate, re-estimate kappa, repeat
-    for i in range(passes + 1):
-        # use the estimated K1 to "undistort" the location of the points in the image,
-        # then calibrate (using the points with low distortion.)
-        params = calibrate(pixelToSensor(lowDistortionPoints, resolution, pixelSize, kappa))
+    # step1: use the central fiducials to calibrate with k1=0
+    params = calibrate(pixelToSensor(lowDistortionPoints, resolution, pixelSize, kappa=0.0))
 
-        # use the new calibration parameters to re-estimate kappa (using the points with high distortion.)
-        kappa = estimateKappa(worldToPixel(highDistortionPoints, params, pixelSize, resolution, yOffset, kappa))
+    # step2: optimize f, Tz, k1 by non-linear method
 
-        # project the points in world coordinates back onto the sensor then record some stats
-        points = worldToPixel(points, params, pixelSize, resolution, yOffset, kappa)
-        stats()
+    xc = np.array([point.sensor[0] for point in highDistortionPoints])
+    yc = np.array([point.sensor[1] for point in highDistortionPoints])
+    R = np.array(params['rotationMatrix'])
+    Pw = np.array([point.world for point in highDistortionPoints])
+    Tx = params['tx']
+    Ty = params['ty']
+
+    ## for init values
+    x0 = np.array([0, params['f'], params['tz']])  # k1,f,Tz
+
+    def obj(x):
+        """
+
+        x_u = x_d(1+k*r^2)=f(r1*Pw+Tx) / (r3*Pw+Tz)
+        so minimize F = ||x_d(1+k*r^2) * (r3*Pw+Tz) - f(r1*Pw+Tx)||^2
+
+        xc: value of x-axis for 2d points in camera coordinate (xc = (xi-u0)*dx)
+        yc: value of y-axis for 2d points in camera coordinate (yc = (yi-v0)*dy)
+        R: rotation matrix of world to camera coordinate
+        Pw: 3d points in world coordinate
+        Tx: translation of x-axis for world to camera coordinate
+        Ty: translation of y-axis for world to camera coordinate
+        :param args:
+            k1: the kappa value for 1st order radial distortion
+            f: focal length
+            Tz: translation of z-axis for world to camera coordinate
+        :return:
+        """
+        k1, f, Tz = x[0], x[1], x[2]
+        r2 = xc * xc + yc * yc
+        vx = xc * (1 + k1 * r2) * (np.sum(R[2, :] * Pw, axis=1) + Tz) - f * (np.sum(R[0, :] * Pw, axis=1) + Tx)
+        vy = yc * (1 + k1 * r2) * (np.sum(R[2, :] * Pw, axis=1) + Tz) - f * (np.sum(R[1, :] * Pw, axis=1) + Ty)
+        value = np.linalg.norm(vx) + np.linalg.norm(vy)
+        print(f'value = {value},k1 = {k1}, f = {f}, Tz = {Tz}')
+        return value
+
+    res = minimize(obj, x0, method='Powell')
+    print(res.fun, '\n', res.success, '\n', res.x)
+    kappa = res.x[0]
+    params['f'] = res.x[1]
+    params['tz'] = res.x[2]
+    points = worldToPixel(points, params, pixelSize, resolution, yOffset, kappa)
+    stats()
 
     translationVector = np.array([params['tx'], params['ty'], params['tz']], np.float64)
 
