@@ -77,24 +77,17 @@ bool TsaiCalibration::ThreeStepCalibration()
 
 bool TsaiCalibration::FiveStepCalibration()
 {
-    std::vector<cv::Vec3d> inner3D;
-    std::vector<cv::Vec2d> inner2D;
     
-    for (const auto i :m_InnerIndex)
-    {
-        inner3D.push_back(m_Points3D[i]);
-        inner2D.push_back(m_Points2D[i]);
-    }
     // Step1
-    if (!Tsai(inner3D,inner2D))        // linear Tsai part
+    if (!Tsai(m_InnerPoints3D, m_InnerPoints2D))        // linear Tsai part
     {
         return false;
     }
-    RefineTsai(inner3D, inner2D);                           // non-linear Tsai part
-    RefineTsaiWithOpticalCenter(inner3D, inner2D);          // non-linear Tsai part with optical center
+    RefineTsai(m_InnerPoints3D, m_InnerPoints2D);                           // non-linear Tsai part
+    RefineTsaiWithOpticalCenter(m_InnerPoints3D, m_InnerPoints2D);          // non-linear Tsai part with optical center
     // Step 2-3
-    RefineExternalParameters(inner3D, inner2D);             // non-linear optimization for external and distortion parameters with centered points
-    RefineIntermalParameters(inner3D, inner2D);             // non-linear optimization for inner parameters with centered points
+    RefineExternalParameters(m_InnerPoints3D, m_InnerPoints2D);             // non-linear optimization for external and distortion parameters with centered points
+    RefineIntermalParameters(m_InnerPoints3D, m_InnerPoints2D);             // non-linear optimization for inner parameters with centered points
     // Step 4-5
     RefineExternalParameters(m_Points3D, m_Points2D);       // non-linear optimization for external and distortion parameters with all points
     RefineIntermalParameters(m_Points3D, m_Points2D);       // non-linear optimization for inner parameters with all points
@@ -103,6 +96,25 @@ bool TsaiCalibration::FiveStepCalibration()
 
 bool TsaiCalibration::Execute(CalibrationType type)
 {
+    if (m_Points2D.size() != m_Points3D.size() || m_InnerPoints2D.size() != m_InnerPoints3D.size())
+    {
+        // invalid point pairs
+        return false;
+    }
+
+    if (m_Points2D.size() < 7)
+    {
+        // insufficient point pairs
+        return false;
+    }
+
+    if (type == CalibrationType::FiveStepOptimization && m_InnerPoints2D.size() < 7)
+    {
+        // insufficient point pairs for FiveStepOptimization
+        return false;
+    }
+
+
 	if (type == CalibrationType::ThreeStepOptimation)
 	{
 		return ThreeStepCalibration();
@@ -699,32 +711,11 @@ void TsaiCalibration::SetImageSize(const int& width, const int& height)
 
 double TsaiCalibration::GetProjectionError()
 {
-    // distortion coeff
-    cv::Mat dist = (cv::Mat_<double>(12, 1) << m_Parameters.k1, m_Parameters.k2,    // k1,k2
-        m_Parameters.p1, m_Parameters.p2,                                           // p1,p2
-        0, 0, 0, 0,                                                                 // k3,k4,k5,k6
-        m_Parameters.s1, 0, m_Parameters.s3, 0);                                    // s1,s2,s3,s4
-    // camera matrix from calibration
-    cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << m_Parameters.kx, 0, m_Parameters.u0,
-        0, m_Parameters.ky, m_Parameters.v0, 0, 0, 1); 
-    // standard camera matrix without optical center offset
-    cv::Mat camera_matrix_undistort = (cv::Mat_<double>(3, 3) << m_Parameters.kx, 0, (m_Parameters.image_width - 1.0) / 2,
-        0, m_Parameters.ky, (m_Parameters.image_height - 1.0) / 2, 0, 0, 1);
     // undistortion the points by calibration
-    std::vector<cv::Vec2d> points2D_undistorted;
-    cv::undistortPoints(m_Points2D, points2D_undistorted,
-        camera_matrix, dist, cv::Mat(),
-        camera_matrix_undistort);
+    std::vector<cv::Vec2d> points2D_undistorted = GetUndistortedPoints();
 
-    // project 3d points with external parameter but standard camera matrix
-    auto angles = RotationMat2Angle(m_Parameters.rotation_matrix);
-    cv::Mat rvec = (cv::Mat_<double>(3, 1) << angles[0], angles[1], angles[2]);
-
-    std::vector<cv::Vec2d> projected_points2D_undistort;
-    cv::projectPoints(m_Points3D, rvec, m_Parameters.translation_vector,    // external parameter from calibration
-        camera_matrix_undistort, cv::Mat(),                                 // project points in standard camera matrix
-        projected_points2D_undistort);
-
+    // project 3d points with external parameter and calibrated camera matrix
+    std::vector<cv::Vec2d> projected_points2D_undistort = GetUndistortionProjectedPoints();
 
     std::vector<double> errors;
 
@@ -769,4 +760,56 @@ cv::Mat TsaiCalibration::UndistortImage(const cv::Mat& src)
     //cv::initUndistortRectifyMap(camera_matrix, dist, cv::Mat(), camera_matrix, image_size, CV_32FC1, map1, map2);
     //cv::remap(src, dst, map1, map2, cv::INTER_LINEAR);
     return dst;
+}
+
+/**
+ * @brief Get undistortion projected points from 3D points with calibrated external parameters
+ * and calibrated camera matrix.
+ * @return 
+*/
+std::vector<cv::Vec2d> TsaiCalibration::GetUndistortionProjectedPoints()
+{
+    // camera matrix from calibration
+    cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << m_Parameters.kx, 0, m_Parameters.u0,
+        0, m_Parameters.ky, m_Parameters.v0, 0, 0, 1);
+
+    // project 3d points with external parameter but standard camera matrix
+    auto angles = RotationMat2Angle(m_Parameters.rotation_matrix);
+    cv::Mat rvec = (cv::Mat_<double>(3, 1) << angles[0], angles[1], angles[2]);
+
+    std::vector<cv::Vec2d> projected_points2D_undistort;
+    cv::projectPoints(m_Points3D, rvec, m_Parameters.translation_vector,    // external parameter from calibration
+        camera_matrix, cv::Mat(),                                           // project points in calibrated camera matrix
+        //camera_matrix_undistort, cv::Mat(),                               // project points in standard camera matrix (without optical center offset)
+        projected_points2D_undistort);
+    return projected_points2D_undistort;
+}
+
+
+/**
+ * @brief Get Undistorted points from distored points with calibrated external parameters 
+ * and calibrated camera matrix.
+ * @return 
+*/
+std::vector<cv::Vec2d> TsaiCalibration::GetUndistortedPoints()
+{
+    // distortion coeff
+    cv::Mat dist = (cv::Mat_<double>(12, 1) << m_Parameters.k1, m_Parameters.k2,    // k1,k2
+        m_Parameters.p1, m_Parameters.p2,                                           // p1,p2
+        0, 0, 0, 0,                                                                 // k3,k4,k5,k6
+        m_Parameters.s1, 0, m_Parameters.s3, 0);                                    // s1,s2,s3,s4
+    // camera matrix from calibration
+    cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << m_Parameters.kx, 0, m_Parameters.u0,
+        0, m_Parameters.ky, m_Parameters.v0, 0, 0, 1);
+    // standard camera matrix without optical center offset
+    cv::Mat camera_matrix_undistort = (cv::Mat_<double>(3, 3) << m_Parameters.kx, 0, (m_Parameters.image_width - 1.0) / 2,
+        0, m_Parameters.ky, (m_Parameters.image_height - 1.0) / 2, 0, 0, 1);
+    // undistortion the points by calibration
+    std::vector<cv::Vec2d> points2D_undistorted;
+    cv::undistortPoints(m_Points2D, points2D_undistorted,
+        camera_matrix, dist, cv::Mat(),
+        camera_matrix);                     // undistort points with calibrated camera matrix
+        //camera_matrix_undistort);         // undistort points with standard camera matrix (without optical center offset)
+
+    return points2D_undistorted;
 }

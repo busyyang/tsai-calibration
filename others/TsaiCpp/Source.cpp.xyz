@@ -1,7 +1,11 @@
 #include "TsaiCalibration.h.xyzh"
 
+
+
+
 void main()
 {
+
     double image_w = 1024;
     double image_h = 1024;
     // 内参
@@ -19,7 +23,7 @@ void main()
     double tz = 950;
 
     // 畸变参数
-    double k1 = 1;
+    double k1 = 5;
     double k2 = 100;
     double p1 = -0.01;
     double p2 = -0.01;
@@ -48,9 +52,13 @@ void main()
     {
         cv::circle(distort_image, cv::Point(points2D[i]), 10, cv::Scalar(0, 0, 255), 2);
     }
-    cv::imwrite("distort_image.jpg", distort_image);
 
-
+    for (size_t i = 0; i < 10; i++)
+    {
+        cv::line(distort_image, cv::Point(0, i * image_h / 10), cv::Point(image_w, i* image_h / 10), cv::Scalar::all(50));
+        cv::line(distort_image, cv::Point(i * image_w / 10, 0), cv::Point(i* image_w / 10, image_h), cv::Scalar::all(50));
+    }
+    cv::imwrite("distort_image.png", distort_image);
 
     if (1)
     {
@@ -59,52 +67,74 @@ void main()
         tsai3.Setf(f);
         tsai3.SetPoints2D(points2D);
         tsai3.SetPoints3D(points3D);
-        tsai3.Execute(TsaiCalibration::ThreeStepOptimation);
+
+        if (!tsai3.Execute(TsaiCalibration::ThreeStepOptimation))
+        {
+            std::cout << "Errors when Three StepOptimization!" << std::endl;
+            exit(-1);
+        }
         double e = tsai3.GetProjectionError();
         std::cout << tsai3.GetCalibratedParameters() << std::endl;
 
-        cv::imwrite("undistort_image_tsai3.jpg", tsai3.UndistortImage(distort_image));
-
-        std::vector<cv::Vec2d> points2D_undistorted_tsai3;
-        auto para3 = tsai3.GetCalibratedParameters();
-        auto angle3 = TsaiCalibration::RotationMat2Angle(para3.rotation_matrix);
-        rvec = (cv::Mat_<double>(3, 1) << angle3[0], angle3[1], angle3[2]);
-        cv::Mat camera_matrix_tsai3 = (cv::Mat_<double>(3, 3) << para3.kx, 0, para3.u0, 0, para3.ky, para3.v0, 0, 0, 1);
-        cv::projectPoints(points3D, rvec, para3.translation_vector, camera_matrix_tsai3, cv::Mat(), points2D_undistorted_tsai3);
-        cv::Mat undistort_image_tsai3_standard = cv::Mat(image_h, image_w, CV_8UC3, cv::Scalar::all(255));
-        for (size_t i = 0; i < points2D_undistorted_tsai3.size(); i++)
+        cv::Mat undistored_image = tsai3.UndistortImage(distort_image);
+        std::vector<cv::Vec2d> projected_undistortion_points = tsai3.GetUndistortionProjectedPoints();
+        for (size_t i = 0; i < projected_undistortion_points.size(); i++)
         {
-            cv::circle(undistort_image_tsai3_standard, cv::Point(points2D_undistorted_tsai3[i]), 10, cv::Scalar(0, 0, 255), 2);
+            cv::drawMarker(undistored_image, cv::Point(projected_undistortion_points[i]), cv::Scalar::all(0));
         }
-        cv::imwrite("undistort_image_tsai3_standard.jpg", undistort_image_tsai3_standard);
+
+        std::vector<cv::Vec2d> undistored_points = tsai3.GetUndistortedPoints();
+        for (size_t i = 0; i < undistored_points.size(); i++)
+        {
+            cv::drawMarker(undistored_image, cv::Point(undistored_points[i]), cv::Scalar(255, 0, 0), cv::MarkerTypes::MARKER_SQUARE);
+        }
+        cv::imwrite("undistort_image_tsai3.png", undistored_image);
     }
 
     
     if (1)
     {
+        std::vector<cv::Vec3d> inner3D;
+        std::vector<cv::Vec2d> inner2D;
+
+        std::vector<int> innerIndex = { 24,25,26,33,34,35,42,43,44,69,70,71,72,73,74,75 };
+        for (const auto i : innerIndex)
+        {
+            inner3D.push_back(points3D[i]);
+            inner2D.push_back(points2D[i]);
+        }
+
+
         TsaiCalibration tsai5;
         tsai5.SetImageSize(image_w, image_h);
         tsai5.Setf(f);
         tsai5.SetPoints3D(points3D);
         tsai5.SetPoints2D(points2D);
-        tsai5.SetInnerIndex({ 24,25,26,33,34,35,42,43,44,69,70,71,72,73,74,75 });
-        tsai5.Execute(TsaiCalibration::FiveStepOptimization);
+
+        tsai5.SetInnerPoints3D(inner3D);
+        tsai5.SetInnerPoints2D(inner2D);
+
+        if (!tsai5.Execute(TsaiCalibration::FiveStepOptimization))
+        {
+            std::cout << "Errors when Five StepOptimization!" << std::endl;
+            exit(-2);
+        }
         double e = tsai5.GetProjectionError();
         std::cout << tsai5.GetCalibratedParameters() << std::endl;
-        cv::imwrite("undistort_image_tsai5.jpg", tsai5.UndistortImage(distort_image));
 
-        std::vector<cv::Vec2d> points2D_undistorted_tsai5;
-        auto para5 = tsai5.GetCalibratedParameters();
-        auto angle5 = TsaiCalibration::RotationMat2Angle(para5.rotation_matrix);
-        rvec = (cv::Mat_<double>(3, 1) << angle5[0], angle5[1], angle5[2]);
-        cv::Mat camera_matrix_tsai3 = (cv::Mat_<double>(3, 3) << para5.kx, 0, para5.u0, 0, para5.ky, para5.v0, 0, 0, 1);
-        cv::projectPoints(points3D, rvec, para5.translation_vector, camera_matrix_tsai3, cv::Mat(), points2D_undistorted_tsai5);
-        cv::Mat undistort_image_tsai5_standard = cv::Mat(image_h, image_w, CV_8UC3, cv::Scalar::all(255));
-        for (size_t i = 0; i < points2D_undistorted_tsai5.size(); i++)
+        cv::Mat undistored_image = tsai5.UndistortImage(distort_image);
+        std::vector<cv::Vec2d> projected_undistortion_points = tsai5.GetUndistortionProjectedPoints();
+        for (size_t i = 0; i < projected_undistortion_points.size(); i++)
         {
-            cv::circle(undistort_image_tsai5_standard, cv::Point(points2D_undistorted_tsai5[i]), 10, cv::Scalar(0, 0, 255), 2);
+            cv::drawMarker(undistored_image, cv::Point(projected_undistortion_points[i]), cv::Scalar::all(0));
         }
-        cv::imwrite("undistort_image_tsai5_standard.jpg", undistort_image_tsai5_standard);
+
+        std::vector<cv::Vec2d> undistored_points = tsai5.GetUndistortedPoints();
+        for (size_t i = 0; i < undistored_points.size(); i++)
+        {
+            cv::drawMarker(undistored_image, cv::Point(undistored_points[i]), cv::Scalar(255, 0, 0), cv::MarkerTypes::MARKER_SQUARE);
+        }
+        cv::imwrite("undistort_image_tsai5.png", undistored_image);
     }
 
 

@@ -1,0 +1,1178 @@
+#include <opencv2/opencv.hpp>
+#include <numeric>
+#include <algorithm>
+
+#include "matrixs/matrixs.hpp"
+#include "matrixs/optimization.hpp"
+
+
+
+static cv::Mat angle2mat(const double& Rx, const double& Ry, const double& Rz)
+{
+    double sa = sin(Rx);
+    double ca = cos(Rx);
+    double sb = sin(Ry);
+    double cb = cos(Ry);
+    double sg = sin(Rz);
+    double cg = cos(Rz);
+
+    cv::Mat rm(3, 3, CV_64FC1);
+
+    rm.at<double>(0, 0) = cb * cg;
+    rm.at<double>(0, 1) = cg * sa * sb - ca * sg;
+    rm.at<double>(0, 2) = sa * sg + ca * cg * sb;
+    rm.at<double>(1, 0) = cb * sg;
+    rm.at<double>(1, 1) = sa * sb * sg + ca * cg;
+    rm.at<double>(1, 2) = ca * sb * sg - cg * sa;
+    rm.at<double>(2, 0) = -sb;
+    rm.at<double>(2, 1) = cb * sa;
+    rm.at<double>(2, 2) = ca * cb;
+
+    return rm;
+}
+
+static std::array<double, 3> mat2angle(const cv::Mat& rm)
+{
+    double r1, r2, r3, r4, r5, r6, r7, sg, cg;
+    if (rm.empty() || rm.cols != 3 || rm.cols != 3)
+    {
+        return {};
+    }
+    r1 = rm.at<double>(0, 0);
+    r2 = rm.at<double>(0, 1);
+    r3 = rm.at<double>(0, 2);
+    r4 = rm.at<double>(1, 0);
+    r5 = rm.at<double>(1, 1);
+    r6 = rm.at<double>(1, 2);
+    r7 = rm.at<double>(2, 0);
+
+    double Rz = atan2(r4, r1);
+    sg = sin(Rz);
+    cg = cos(Rz);
+    double Ry = atan2(-r7, r1 * cg + r4 * sg);
+    double Rx = atan2(r3 * sg - r6 * cg, r5 * cg - r2 * sg);
+
+    return { Rx,Ry,Rz };
+}
+
+struct CarmTransformParameters
+{
+
+    cv::Vec3d camera_pose; /* the position of C-arm camera*/
+    cv::Mat rotation_matrix; /* the rotation matrix from physical coordinate to camera coordinate. */
+    cv::Mat translation_vector; /* the translation vector from physical coordinate to camera coordinate. */
+    cv::Vec3d image_origin; /* the origion of xray image in physical coordinate. */
+    cv::Vec3d normal_vector_of_plane; /* the normal vector of image plane */
+    cv::Vec3d image_spacing; /* the spacing of x-ray image. */
+    double k1; /*1st order radial distortion coeffient*/
+    double k2; /*2nd order radial distortion coeffient*/
+    double p1; /*1st order tangential distortion coeffient*/
+    double p2; /*2nd order tangential distortion coeffient*/
+    double s1; /*1st order thin prism distortion coeffient for x*/
+    double s3; /*1st order thin prism distortion coeffient for y*/
+    double f; /* the distance between x-ray source and detector.*/
+    double kx;
+    double ky;
+    double u0;
+    double v0;
+    CarmTransformParameters() :
+        k1(0), kx(0), ky(0), u0(0), v0(0), f(1011) {};
+
+    friend std::ostream& operator<<(std::ostream& os, const CarmTransformParameters& para)
+    {
+        os << "Carm Transform Parameter: " << std::endl;
+        os << "\tf = " << para.f << std::endl;
+        os << "\tkx = " << para.kx << std::endl;
+        os << "\tky = " << para.ky << std::endl;
+        //os << "\tCamera Pose = " << para.camera_pose << std::endl;
+        //os << "\tRotation Matrix = \n" << para.rotation_matrix << std::endl;
+        os << "\tTranslation Vector = " << para.translation_vector.t() << std::endl;
+        os << "\tAngles = " << mat2angle(para.rotation_matrix)[0] << "," << mat2angle(para.rotation_matrix)[1] << "," << mat2angle(para.rotation_matrix)[2] << std::endl;
+        os << "\tImage Spacing = " << para.image_spacing << std::endl;
+        os << "\tsx = " << para.image_spacing[1] / para.image_spacing[0] << std::endl;
+        os << "\tu0 = " << para.u0 << std::endl;
+        os << "\tv0 = " << para.v0 << std::endl;
+        os << "\tdx = " << para.image_spacing[0] << std::endl;
+        os << "\tdy = " << para.image_spacing[1] << std::endl;
+        os << "\tk1 = " << para.k1 << std::endl;
+        os << "\tk2 = " << para.k2 << std::endl;
+        os << "\tp1 = " << para.p1 << std::endl;
+        os << "\tp2 = " << para.p2 << std::endl;
+        os << "\ts1 = " << para.s1 << std::endl;
+        os << "\ts3 = " << para.s3 << std::endl;
+
+
+
+        return os;
+    }
+};
+
+static std::vector<int> m_ImageSize({ 1024,1024 });
+static std::vector<double> m_ImageSpacing({ 0.209,0.209 });
+static CarmTransformParameters m_CarmTransformParameters;
+
+
+
+void set_data(std::vector<cv::Vec3d>& points3D, std::vector<cv::Vec2d>& points2D)
+{
+    points3D.clear();
+    points2D.clear();
+    //set data
+    std::vector<std::vector<double>> data = {
+#include "points.data"
+    };
+    for (size_t i = 0; i < data.size(); i++)
+    {
+        points3D.push_back(cv::Vec3d(data[i][0], data[i][1], data[i][2]));
+        points2D.push_back(cv::Vec2d(data[i][3], data[i][4]));
+    }
+}
+
+void set_inner_data(std::vector<cv::Vec3d>& points3D, std::vector<cv::Vec2d>& points2D)
+{
+    points3D.clear();
+    points2D.clear();
+    //set data
+    std::vector<std::vector<double>> data = {
+#include "points_inner.data"
+    };
+    for (size_t i = 0; i < data.size(); i++)
+    {
+        points3D.push_back(cv::Vec3d(data[i][0], data[i][1], data[i][2]));
+        points2D.push_back(cv::Vec2d(data[i][3], data[i][4]));
+    }
+}
+
+
+void ProjectErrorStat(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    cv::Mat matIntrinsic = (cv::Mat_<double>(3, 3) << m_CarmTransformParameters.kx, 0, m_CarmTransformParameters.u0,
+        0, m_CarmTransformParameters.ky, m_CarmTransformParameters.v0, 0, 0, 1);
+    std::vector<double> errors;
+
+    cv::Mat rotation_matrix = m_CarmTransformParameters.rotation_matrix;
+    cv::Mat translation_vector = m_CarmTransformParameters.translation_vector;
+    for (size_t i = 0; i < image2DPoints.size(); i++)
+    {
+        cv::Mat p3d = (cv::Mat_<double>(3, 1) << markers3DPoints[i][0], markers3DPoints[i][1], markers3DPoints[i][2]);
+        cv::Mat pu = matIntrinsic * (rotation_matrix * p3d + translation_vector);
+        pu = pu / pu.at<double>(2, 0);  // point in pixel unit without distortion
+
+        cv::Mat pd = (cv::Mat_<double>(2, 1) << (image2DPoints[i][0] - m_CarmTransformParameters.u0) * m_CarmTransformParameters.image_spacing[0],
+            (image2DPoints[i][1] - m_CarmTransformParameters.v0) * m_CarmTransformParameters.image_spacing[1]); // point in camera coordinate with distortion
+
+        double r2 = std::pow(pd.at<double>(0, 0), 2) + std::pow(pd.at<double>(1, 0), 2);
+        cv::Mat upd = pd * (1 + m_CarmTransformParameters.k1 * r2); //undistored point in camera coordinate
+        upd = (cv::Mat_<double>(2, 1) << upd.at<double>(0, 0) / m_CarmTransformParameters.image_spacing[0] + m_CarmTransformParameters.u0,
+            upd.at<double>(1, 0) / m_CarmTransformParameters.image_spacing[1] + m_CarmTransformParameters.v0); // undistored point in pixel unit
+
+        double error = cv::norm(pu.rowRange(0, 2) - upd);
+        errors.push_back(error);
+
+    }
+
+    double maxe = *std::max_element(errors.begin(), errors.end());
+    double mine = *std::min_element(errors.begin(), errors.end());
+    double meane = std::reduce(errors.begin(), errors.end()) / errors.size();
+    std::cout << "Max Projection Error = " << maxe << std::endl;
+    std::cout << "Min Projection Error = " << mine << std::endl;
+    std::cout << "Mean Projection Error = " << meane << std::endl;
+
+}
+
+
+void ProjectErrorStatOpenCV(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    cv::Mat matIntrinsic = (cv::Mat_<double>(3, 3) << m_CarmTransformParameters.kx, 0, m_CarmTransformParameters.u0,
+        0, m_CarmTransformParameters.ky, m_CarmTransformParameters.v0, 0, 0, 1);
+    std::vector<double> errors;
+
+    cv::Mat rotation_matrix = m_CarmTransformParameters.rotation_matrix;
+    cv::Mat translation_vector = m_CarmTransformParameters.translation_vector;
+    for (size_t i = 0; i < image2DPoints.size(); i++)
+    {
+
+        double k1 = m_CarmTransformParameters.k1;
+        double k2 = m_CarmTransformParameters.k2;
+        double p1 = m_CarmTransformParameters.p1;
+        double p2 = m_CarmTransformParameters.p2;
+        double s1 = m_CarmTransformParameters.s1;
+        double s3 = m_CarmTransformParameters.s3;
+
+        cv::Mat p3d = (cv::Mat_<double>(3, 1) << markers3DPoints[i][0], markers3DPoints[i][1], markers3DPoints[i][2]);
+        cv::Mat pu = rotation_matrix * p3d + translation_vector;
+        pu = pu / pu.at<double>(2, 0);  // point in unit camera coordinate unit without distortion
+
+
+        double r2 = std::pow(pu.at<double>(0, 0), 2) + std::pow(pu.at<double>(1, 0), 2);
+        double xp = pu.at<double>(0, 0);
+        double yp = pu.at<double>(1, 0);
+
+        double xd = xp * (1 + k1 * r2 + k2 * r2 * r2) + 2 * p1 * xp * yp + p2 * (r2 + 2 * xp * xp) + s1 * r2;
+        double yd = yp * (1 + k1 * r2 + k2 * r2 * r2) + p1 * (r2 + 2 * yp * yp) + 2 * p2 * xp * yp + s3 * r2;
+
+        cv::Mat pd = (cv::Mat_<double>(2, 1) << xd, yd);
+        pd.at<double>(0, 0) = pd.at<double>(0, 0) * m_CarmTransformParameters.kx + m_CarmTransformParameters.u0;
+        pd.at<double>(1, 0) = pd.at<double>(1, 0) * m_CarmTransformParameters.ky + m_CarmTransformParameters.v0;
+        
+        double error = std::pow(pd.at<double>(0, 0) - image2DPoints[i][0], 2) + std::pow(pd.at<double>(1, 0) - image2DPoints[i][1], 2);
+        error = sqrt(error);
+        errors.push_back(error);
+
+    }
+
+    double maxe = *std::max_element(errors.begin(), errors.end());
+    double mine = *std::min_element(errors.begin(), errors.end());
+    double meane = std::reduce(errors.begin(), errors.end()) / errors.size();
+    std::cout << "Max Projection Error = " << maxe << std::endl;
+    std::cout << "Min Projection Error = " << mine << std::endl;
+    std::cout << "Mean Projection Error = " << meane << std::endl;
+
+}
+
+
+
+
+
+bool Tsai(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    if (markers3DPoints.size() != image2DPoints.size())
+    {
+        return false;
+    }
+    int size = markers3DPoints.size();
+    // compute r11,r12,r13,r21,r22,r23,Tx,Ty
+    double offset_x = (m_ImageSize[0] - 1.0) / 2.0;
+    double offset_y = (m_ImageSize[1] - 1.0) / 2.0;
+    //double offset_x = m_CarmTransformParameters.u0;
+    //double offset_y = m_CarmTransformParameters.v0;
+
+    cv::Vec3d spacing = m_CarmTransformParameters.image_spacing;
+
+    cv::Mat A = cv::Mat_<double>(size, 7);
+    cv::Mat B = cv::Mat_<double>(size, 1);
+    for (size_t i = 0; i < size; i++)
+    {
+        double xi = (image2DPoints[i][0] - offset_x);
+        double yi = (image2DPoints[i][1] - offset_y);
+
+        A.at<double>(i, 0) = xi * markers3DPoints[i][0];
+        A.at<double>(i, 1) = xi * markers3DPoints[i][1];
+        A.at<double>(i, 2) = xi * markers3DPoints[i][2];
+        A.at<double>(i, 3) = -yi * markers3DPoints[i][0];
+        A.at<double>(i, 4) = -yi * markers3DPoints[i][1];
+        A.at<double>(i, 5) = -yi * markers3DPoints[i][2];
+        A.at<double>(i, 6) = -yi;
+
+        B.at<double>(i, 0) = -xi;
+    }
+    cv::Mat V = (A.t() * A).inv() * A.t() * B;//[r21/Ty,r22/Ty,r23/Ty,alpha*r11/Ty,alpha*r12/Ty,alpha*r13/Ty,alpha*Tx/Ty]
+    double TySquare = 1.0 / (pow(V.at<double>(0, 0), 2) + pow(V.at<double>(1, 0), 2) + pow(V.at<double>(2, 0), 2));
+
+    // get the sign of Ty
+    double far_distance = 0.0;
+    int far_idx = 0;
+    for (size_t i = 0; i < size; i++)
+    {
+        double xi = (image2DPoints[i][0] - offset_x);
+        double yi = (image2DPoints[i][1] - offset_y);
+        double r = xi * xi + yi * yi;
+        if (r > far_distance)
+        {
+            far_distance = r;
+            far_idx = i;
+        }
+    }
+    // yi=y-offset_y 与Yc=r_21*x_w+r_22*y_w+r_23*z_w+Ty应该是同符号的。yi*Yc>0.
+    // 假设Ty>0有： yi*(Yc/Ty)>0，否则Ty>0的假设不成立。
+    double sign = (image2DPoints[far_idx][1] - offset_y) * (
+        V.at<double>(0, 0) * markers3DPoints[far_idx][0] +
+        V.at<double>(1, 0) * markers3DPoints[far_idx][1] +
+        V.at<double>(2, 0) * markers3DPoints[far_idx][2]
+        + 1
+        );
+    double Ty = sqrt(TySquare);
+    if (sign < 0)
+    {
+        Ty = -Ty;
+    }
+    cv::Mat r2 = (V.rowRange(0, 3) * Ty).t(); // to row vector
+    double alpha = cv::norm(V.rowRange(3, 6) * Ty);
+    cv::Mat r1 = (V.rowRange(3, 6) * Ty / alpha).t();  // to row vector
+    double Tx = V.at<double>(6, 0) * Ty / alpha;
+    cv::Mat r3 = r1.cross(r2);
+    cv::Mat R;
+    cv::vconcat(std::vector<cv::Mat>{r1, r2, r3}, R);
+
+
+    // compute fx,fy,Tz
+    cv::Mat AA = cv::Mat_<double>(size, 2);
+    cv::Mat BB = cv::Mat_<double>(size, 1);
+    for (size_t i = 0; i < size; i++)
+    {
+        cv::Mat matp3d = (cv::Mat_<double>(1, 3) << markers3DPoints[i][0],
+            markers3DPoints[i][1], markers3DPoints[i][2]);
+        double xi = image2DPoints[i][0] - offset_x;
+        double yi = image2DPoints[i][1] - offset_y;
+
+        AA.at<double>(i, 0) = r2.dot(matp3d) + Ty;
+        AA.at<double>(i, 1) = -yi;
+        BB.at<double>(i, 0) = yi * r3.dot(matp3d);
+
+    }
+
+    cv::Mat matKyTz = (AA.t() * AA).inv() * (AA.t() * BB);
+    double ky = matKyTz.at<double>(0, 0);
+    double Tz = matKyTz.at<double>(1, 0);
+    double kx = ky * alpha;
+
+    // 固定SID标定内参
+    double f = m_CarmTransformParameters.f;
+    double dx = m_CarmTransformParameters.f / kx;
+    double dy = m_CarmTransformParameters.f / ky;
+
+    cv::Mat T = (cv::Mat_<double>(3, 1) << Tx, Ty, Tz);
+    cv::Mat camera_pose = -R.t() * T;
+
+    // the origin of pixel coordinate located in the left-up corner, which is on the negitive side of X and Y axis.
+    cv::Mat origin_camera_coordinate = (cv::Mat_<double>(3, 1) << 0.0 - offset_x * dx, 0.0 - offset_y * dy, f);
+    cv::Mat image_origin = R.t() * (origin_camera_coordinate - T);
+
+
+    // TODO: 输出参数还没有完全输出
+    m_CarmTransformParameters.f = f;
+    m_CarmTransformParameters.kx = kx;
+    m_CarmTransformParameters.ky = ky;
+    m_CarmTransformParameters.u0 = offset_x;
+    m_CarmTransformParameters.v0 = offset_y;
+    m_CarmTransformParameters.rotation_matrix = R;
+    m_CarmTransformParameters.translation_vector = T;
+    m_CarmTransformParameters.camera_pose = camera_pose;
+    m_CarmTransformParameters.image_spacing = cv::Vec3d(dx, dy, 1);
+    m_CarmTransformParameters.image_origin = cv::Vec3d(
+        image_origin.at<double>(0, 0),
+        image_origin.at<double>(1, 0),
+        image_origin.at<double>(2, 0)
+    );
+
+    // get normal vector of image plane
+    cv::Mat oz = (cv::Mat_<double>(3, 1) << 0, 0, 100);
+    oz = (m_CarmTransformParameters.rotation_matrix.t() * (oz - m_CarmTransformParameters.translation_vector));
+    cv::Mat normalMat = (camera_pose - oz) / cv::norm(camera_pose - oz);
+    m_CarmTransformParameters.normal_vector_of_plane = cv::Vec3d(
+        normalMat.at<double>(0, 0),
+        normalMat.at<double>(1, 0),
+        normalMat.at<double>(2, 0)
+    );
+
+    return true;
+}
+
+// 优化dx,dy,Tz,k1
+void RefineTsai(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    double tx = m_CarmTransformParameters.translation_vector.at<double>(0, 0);
+    double ty = m_CarmTransformParameters.translation_vector.at<double>(1, 0);
+
+    auto r1 = m_CarmTransformParameters.rotation_matrix.rowRange(0, 1);
+    auto r2 = m_CarmTransformParameters.rotation_matrix.rowRange(1, 2);
+    auto r3 = m_CarmTransformParameters.rotation_matrix.rowRange(2, 3);
+    std::vector<double> r1p, r2p, r3p;
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r1p),
+        [=](auto p) {return r1.at<double>(0, 0) * p[0] + r1.at<double>(0, 1) * p[1] + r1.at<double>(0, 2) * p[2]; });
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r2p),
+        [=](auto p) {return r2.at<double>(0, 0) * p[0] + r2.at<double>(0, 1) * p[1] + r2.at<double>(0, 2) * p[2]; });
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r3p),
+        [=](auto p) {return r3.at<double>(0, 0) * p[0] + r3.at<double>(0, 1) * p[1] + r3.at<double>(0, 2) * p[2]; });
+
+
+    auto obj = [=](const ppx::MatrixS<4, 1>& x)
+    {
+        double k1 = x[0];
+        double dx = x[1];
+        double dy = x[2];
+        double tz = x[3];
+        double value = 0, vx = 0, vy = 0;
+        for (size_t i = 0; i < markers3DPoints.size(); i++)
+        {
+            double xc = (image2DPoints[i][0] - m_CarmTransformParameters.u0) * dx;
+            double yc = (image2DPoints[i][1] - m_CarmTransformParameters.v0) * dy;
+            double r2 = xc * xc + yc * yc;
+            vx += std::pow(xc * (1 + k1 * r2) * (r3p[i] + tz) - m_CarmTransformParameters.f * (r1p[i] + tx), 2);
+            vy += std::pow(yc * (1 + k1 * r2) * (r3p[i] + tz) - m_CarmTransformParameters.f * (r2p[i] + ty), 2);
+        }
+        value = std::sqrt(vx) + std::sqrt(vy);
+
+        //std::cout << "Value = " << value;
+        //std::cout << "\tk1 = " << k1;
+        //std::cout << "\tdx = " << dx;
+        //std::cout << "\tdy = " << dy;
+        //std::cout << "\ttz = " << tz << std::endl;
+
+        return value;
+    };
+    ppx::MatrixS<4, 1> x0{ 0.0,
+        (double)m_CarmTransformParameters.image_spacing[0],
+        (double)m_CarmTransformParameters.image_spacing[1],
+        m_CarmTransformParameters.translation_vector.at<double>(2, 0)
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+    m_CarmTransformParameters.k1 = res.x[0];
+    m_CarmTransformParameters.image_spacing = cv::Vec3d(res.x[1], res.x[2], 1);
+    m_CarmTransformParameters.translation_vector.at<double>(2, 0) = res.x[3];
+    m_CarmTransformParameters.kx = m_CarmTransformParameters.f / res.x[1];
+    m_CarmTransformParameters.ky = m_CarmTransformParameters.f / res.x[2];
+}
+
+// 优化dx,dy,Tz,k1,u0,v0, 按Tsai论文中的公式 X_u=X_d+δ_x
+void RefineTsai2(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    double tx = m_CarmTransformParameters.translation_vector.at<double>(0, 0);
+    double ty = m_CarmTransformParameters.translation_vector.at<double>(1, 0);
+
+    auto r1 = m_CarmTransformParameters.rotation_matrix.rowRange(0, 1);
+    auto r2 = m_CarmTransformParameters.rotation_matrix.rowRange(1, 2);
+    auto r3 = m_CarmTransformParameters.rotation_matrix.rowRange(2, 3);
+    std::vector<double> r1p, r2p, r3p;
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r1p),
+        [=](auto p) {return r1.at<double>(0, 0) * p[0] + r1.at<double>(0, 1) * p[1] + r1.at<double>(0, 2) * p[2]; });
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r2p),
+        [=](auto p) {return r2.at<double>(0, 0) * p[0] + r2.at<double>(0, 1) * p[1] + r2.at<double>(0, 2) * p[2]; });
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r3p),
+        [=](auto p) {return r3.at<double>(0, 0) * p[0] + r3.at<double>(0, 1) * p[1] + r3.at<double>(0, 2) * p[2]; });
+
+
+    auto obj = [=](const ppx::MatrixS<6, 1>& x)
+    {
+        double k1 = x[0];
+        double dx = x[1];
+        double dy = x[2];
+        double tz = x[3];
+        double u0 = x[4];
+        double v0 = x[5];
+        double value = 0, vx = 0, vy = 0;
+        for (size_t i = 0; i < markers3DPoints.size(); i++)
+        {
+            double xc = (image2DPoints[i][0] - u0) * dx;
+            double yc = (image2DPoints[i][1] - v0) * dy;
+            double r2 = xc * xc + yc * yc;
+            vx += std::pow(xc * (1 + k1 * r2) * (r3p[i] + tz) - m_CarmTransformParameters.f * (r1p[i] + tx), 2);
+            vy += std::pow(yc * (1 + k1 * r2) * (r3p[i] + tz) - m_CarmTransformParameters.f * (r2p[i] + ty), 2);
+        }
+        value = std::sqrt(vx) + std::sqrt(vy);
+
+        //std::cout << "Value = " << value;
+        //std::cout << "\tk1 = " << k1;
+        //std::cout << "\tdx = " << dx;
+        //std::cout << "\tdy = " << dy;
+        //std::cout << "\ttz = " << tz << std::endl;
+
+        return value;
+    };
+    ppx::MatrixS<6, 1> x0{ 0.0,
+        (double)m_CarmTransformParameters.image_spacing[0],
+        (double)m_CarmTransformParameters.image_spacing[1],
+        m_CarmTransformParameters.translation_vector.at<double>(2, 0),
+        m_CarmTransformParameters.u0,
+        m_CarmTransformParameters.v0
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+    m_CarmTransformParameters.k1 = res.x[0];
+    m_CarmTransformParameters.image_spacing = cv::Vec3d(res.x[1], res.x[2], 1);
+    m_CarmTransformParameters.translation_vector.at<double>(2, 0) = res.x[3];
+    m_CarmTransformParameters.kx = m_CarmTransformParameters.f / res.x[1];
+    m_CarmTransformParameters.ky = m_CarmTransformParameters.f / res.x[2];
+
+    m_CarmTransformParameters.u0 = res.x[4];
+    m_CarmTransformParameters.v0 = res.x[5];
+}
+
+
+// 优化dx,dy,Tz,k1,u0,v0, 按OpenCV公式 X_d=X_u+δ_x
+void RefineTsai3(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    double tx = m_CarmTransformParameters.translation_vector.at<double>(0, 0);
+    double ty = m_CarmTransformParameters.translation_vector.at<double>(1, 0);
+
+    auto r1 = m_CarmTransformParameters.rotation_matrix.rowRange(0, 1);
+    auto r2 = m_CarmTransformParameters.rotation_matrix.rowRange(1, 2);
+    auto r3 = m_CarmTransformParameters.rotation_matrix.rowRange(2, 3);
+    std::vector<double> r1p, r2p, r3p;
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r1p),
+        [=](auto p) {return r1.at<double>(0, 0) * p[0] + r1.at<double>(0, 1) * p[1] + r1.at<double>(0, 2) * p[2]; });
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r2p),
+        [=](auto p) {return r2.at<double>(0, 0) * p[0] + r2.at<double>(0, 1) * p[1] + r2.at<double>(0, 2) * p[2]; });
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r3p),
+        [=](auto p) {return r3.at<double>(0, 0) * p[0] + r3.at<double>(0, 1) * p[1] + r3.at<double>(0, 2) * p[2]; });
+
+
+    auto obj = [=](const ppx::MatrixS<6, 1>& x)
+    {
+        double k1 = x[0];
+        double dx = x[1];
+        double dy = x[2];
+        double tz = x[3];
+        double u0 = x[4];
+        double v0 = x[5];
+
+        double value = 0;
+        for (size_t i = 0; i < markers3DPoints.size(); i++)
+        {
+            double xu = (r1p[i] + tx) / (r3p[i] + tz);
+            double yu = (r2p[i] + ty) / (r3p[i] + tz);
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs);
+            double y_pie = yu * (1 + k1 * rs);
+
+            double u = m_CarmTransformParameters.f / dx * x_pie + u0;
+            double v = m_CarmTransformParameters.f / dy * y_pie + v0;
+
+            value += hypot(u - image2DPoints[i][0], v - image2DPoints[i][1]);
+        }
+        return value;
+    };
+
+    ppx::MatrixS<6, 1> x0{ // k1,dx,dy,Tz,u0,v0
+        0.0,
+        (double)m_CarmTransformParameters.image_spacing[0],
+        (double)m_CarmTransformParameters.image_spacing[1],
+        m_CarmTransformParameters.translation_vector.at<double>(2,0),
+        m_CarmTransformParameters.u0,
+        m_CarmTransformParameters.v0
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+    m_CarmTransformParameters.k1 = res.x[0];
+    m_CarmTransformParameters.image_spacing = cv::Vec3d(res.x[1], res.x[2], 1);
+    m_CarmTransformParameters.translation_vector.at<double>(2, 0) = res.x[3];
+    m_CarmTransformParameters.kx = m_CarmTransformParameters.f / res.x[1];
+    m_CarmTransformParameters.ky = m_CarmTransformParameters.f / res.x[2];
+
+    m_CarmTransformParameters.u0 = res.x[4];
+    m_CarmTransformParameters.v0 = res.x[5];
+}
+
+
+
+
+//优化Rx,Ry,Rz,Tx,Ty,Tz,k1,k2,p1,p2,s1,s2,按OpenCV公式 X_d=X_u+δ_x,其中Rx,Ry,Rz是旋转角度
+void RefineTsai4(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    auto obj = [=](ppx::MatrixS<12, 1> x) {
+        double _Rx = x[0];
+        double _Ry = x[1];
+        double _Rz = x[2];
+
+        double tx = x[3];
+        double ty = x[4];
+        double tz = x[5];
+
+        double k1 = x[6];
+        double k2 = x[7];
+
+        double p1 = x[8];
+        double p2 = x[9];
+
+        double s1 = x[10];
+        double s3 = x[11];
+
+        double value = 0.0;
+        cv::Mat rm = angle2mat(_Rx, _Ry, _Rz);
+        for (size_t i = 0; i < markers3DPoints.size(); i++)
+        {
+            cv::Vec3f p = markers3DPoints[i];
+            double zc = rm.at<double>(2, 0)* p[0] + rm.at<double>(2, 1) * p[1] + rm.at<double>(2, 2) * p[2] + tz;
+            double xu = (rm.at<double>(0, 0) * p[0] + rm.at<double>(0, 1) * p[1] + rm.at<double>(0, 2) * p[2] + tx) / zc;
+            double yu = (rm.at<double>(1, 0) * p[0] + rm.at<double>(1, 1) * p[1] + rm.at<double>(1, 2) * p[2] + ty) / zc;
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs + k2 * rs * rs) + 2 * p1 * xu * yu + p2 * (rs + 2 * xu * xu) + s1 * rs;
+            double y_pie = yu * (1 + k1 * rs + k2 * rs * rs) + p1 * (rs + 2 * yu * yu) + 2 * p2 * xu * yu + s3 * rs;
+
+            double u = m_CarmTransformParameters.kx * x_pie + m_CarmTransformParameters.u0;
+            double v = m_CarmTransformParameters.ky * y_pie + m_CarmTransformParameters.v0;
+
+            value += (u - image2DPoints[i][0]) * (u - image2DPoints[i][0]) + (v - image2DPoints[i][1]) * (v - image2DPoints[i][1]);
+        }
+        return value;
+    };
+
+    std::array<double,3> angles = mat2angle(m_CarmTransformParameters.rotation_matrix);
+    ppx::MatrixS<12, 1> x0 = {
+        angles[0],
+        angles[1],
+        angles[2],
+        m_CarmTransformParameters.translation_vector.at<double>(0,0),
+        m_CarmTransformParameters.translation_vector.at<double>(1,0),
+        m_CarmTransformParameters.translation_vector.at<double>(2,0),
+        m_CarmTransformParameters.k1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+
+    m_CarmTransformParameters.rotation_matrix = angle2mat(res.x[0], res.x[1], res.x[2]);
+    m_CarmTransformParameters.translation_vector = (cv::Mat_<double>(3, 1) << res.x[3], res.x[4], res.x[5]);
+    m_CarmTransformParameters.k1 = res.x[6];
+    m_CarmTransformParameters.k2 = res.x[7];
+    m_CarmTransformParameters.p1 = res.x[8];
+    m_CarmTransformParameters.p2 = res.x[9];
+    m_CarmTransformParameters.s1 = res.x[10];
+    m_CarmTransformParameters.s3 = res.x[11];
+
+
+}
+
+// 优化: dx,dy,u0,v0
+void RefineTsai5(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    auto r1 = m_CarmTransformParameters.rotation_matrix.rowRange(0, 1);
+    auto r2 = m_CarmTransformParameters.rotation_matrix.rowRange(1, 2);
+    auto r3 = m_CarmTransformParameters.rotation_matrix.rowRange(2, 3);
+    std::vector<double> r1p, r2p, r3p;
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r1p),
+        [=](auto p) {return r1.at<double>(0, 0) * p[0] + r1.at<double>(0, 1) * p[1] + r1.at<double>(0, 2) * p[2]; });
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r2p),
+        [=](auto p) {return r2.at<double>(0, 0) * p[0] + r2.at<double>(0, 1) * p[1] + r2.at<double>(0, 2) * p[2]; });
+    std::transform(markers3DPoints.begin(), markers3DPoints.end(), std::back_inserter(r3p),
+        [=](auto p) {return r3.at<double>(0, 0) * p[0] + r3.at<double>(0, 1) * p[1] + r3.at<double>(0, 2) * p[2]; });
+
+
+    auto obj = [=](ppx::MatrixS<4, 1> x) {
+        double dx = x[0];
+        double dy = x[1];
+        double u0 = x[2];
+        double v0 = x[3];
+
+        double value = 0.0;
+
+        double tx = m_CarmTransformParameters.translation_vector.at<double>(0, 0);
+        double ty = m_CarmTransformParameters.translation_vector.at<double>(1, 0);
+        double tz = m_CarmTransformParameters.translation_vector.at<double>(2, 0);
+
+        double k1 = m_CarmTransformParameters.k1;
+        double k2 = m_CarmTransformParameters.k2;
+
+        double p1 = m_CarmTransformParameters.p1;
+        double p2 = m_CarmTransformParameters.p2;
+
+        double s1 = m_CarmTransformParameters.s1;
+        double s3 = m_CarmTransformParameters.s3;
+
+        for (size_t i = 0; i < markers3DPoints.size(); i++)
+        {
+            double xu = (r1p[i] + tx) / (r3p[i] + tz);
+            double yu = (r2p[i] + ty) / (r3p[i] + tz);
+
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs + k2 * rs * rs) + 2 * p1 * xu * yu + p2 * (rs + 2 * xu * xu) + s1 * rs;
+            double y_pie = yu * (1 + k1 * rs + k2 * rs * rs) + p1 * (rs + 2 * yu * yu) + 2 * p2 * xu * yu + s3 * rs;
+
+            double u = m_CarmTransformParameters.f / dx * x_pie + u0;
+            double v = m_CarmTransformParameters.f / dy * y_pie + v0;
+
+            value += hypot(u - image2DPoints[i][0], v - image2DPoints[i][1]);
+        }
+        return value;
+    };
+
+    ppx::MatrixS<4, 1> x0 = {
+        (double)m_CarmTransformParameters.image_spacing[0],
+        (double)m_CarmTransformParameters.image_spacing[1],
+        m_CarmTransformParameters.u0,
+        m_CarmTransformParameters.v0
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+
+    m_CarmTransformParameters.image_spacing[0] = res.x[0];
+    m_CarmTransformParameters.image_spacing[1] = res.x[1];
+
+    m_CarmTransformParameters.kx = m_CarmTransformParameters.f / res.x[0];
+    m_CarmTransformParameters.ky = m_CarmTransformParameters.f / res.x[1];
+
+    m_CarmTransformParameters.u0 = res.x[2];
+    m_CarmTransformParameters.v0 = res.x[3];
+
+}
+
+// 优化除了u0,v0以外的所有参数：rx,ry,rz,tx,ty,tz,k1,k2,p1,p2,s1,s3,dx,dy
+void RefineTsai6(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    auto obj = [=](ppx::MatrixS<14, 1> x) {
+        double _Rx = x[0];
+        double _Ry = x[1];
+        double _Rz = x[2];
+
+        double tx = x[3];
+        double ty = x[4];
+        double tz = x[5];
+
+        double k1 = x[6];
+        double k2 = x[7];
+
+        double p1 = x[8];
+        double p2 = x[9];
+
+        double s1 = x[10];
+        double s3 = x[11];
+
+        double dx = x[12];
+        double dy = x[13];
+
+        double value = 0.0;
+        cv::Mat rm = angle2mat(_Rx, _Ry, _Rz);
+        for (size_t i = 0; i < markers3DPoints.size(); i++)
+        {
+            cv::Vec3f p = markers3DPoints[i];
+            double zc = rm.at<double>(2, 0) * p[0] + rm.at<double>(2, 1) * p[1] + rm.at<double>(2, 2) * p[2] + tz;
+            double xu = (rm.at<double>(0, 0) * p[0] + rm.at<double>(0, 1) * p[1] + rm.at<double>(0, 2) * p[2] + tx) / zc;
+            double yu = (rm.at<double>(1, 0) * p[0] + rm.at<double>(1, 1) * p[1] + rm.at<double>(1, 2) * p[2] + ty) / zc;
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs + k2 * rs * rs) + 2 * p1 * xu * yu + p2 * (rs + 2 * xu * xu) + s1 * rs;
+            double y_pie = yu * (1 + k1 * rs + k2 * rs * rs) + p1 * (rs + 2 * yu * yu) + 2 * p2 * xu * yu + s3 * rs;
+
+            double u = m_CarmTransformParameters.f / dx * x_pie + m_CarmTransformParameters.u0;
+            double v = m_CarmTransformParameters.f / dy * y_pie + m_CarmTransformParameters.v0;
+
+            value += (u - image2DPoints[i][0]) * (u - image2DPoints[i][0]) + (v - image2DPoints[i][1]) * (v - image2DPoints[i][1]);
+        }
+        return value;
+    };
+
+    std::array<double, 3> angles = mat2angle(m_CarmTransformParameters.rotation_matrix);
+    ppx::MatrixS<14, 1> x0 = {
+        angles[0],
+        angles[1],
+        angles[2],
+        m_CarmTransformParameters.translation_vector.at<double>(0,0),
+        m_CarmTransformParameters.translation_vector.at<double>(1,0),
+        m_CarmTransformParameters.translation_vector.at<double>(2,0),
+        m_CarmTransformParameters.k1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        m_CarmTransformParameters.image_spacing[0],
+        m_CarmTransformParameters.image_spacing[1]
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+
+    m_CarmTransformParameters.rotation_matrix = angle2mat(res.x[0], res.x[1], res.x[2]);
+    m_CarmTransformParameters.translation_vector = (cv::Mat_<double>(3, 1) << res.x[3], res.x[4], res.x[5]);
+    m_CarmTransformParameters.k1 = res.x[6];
+    m_CarmTransformParameters.k2 = res.x[7];
+    m_CarmTransformParameters.p1 = res.x[8];
+    m_CarmTransformParameters.p2 = res.x[9];
+    m_CarmTransformParameters.s1 = res.x[10];
+    m_CarmTransformParameters.s3 = res.x[11];
+
+    m_CarmTransformParameters.image_spacing[0] = res.x[12];
+    m_CarmTransformParameters.image_spacing[1] = res.x[13];
+
+    m_CarmTransformParameters.kx = m_CarmTransformParameters.f / res.x[12];
+    m_CarmTransformParameters.ky = m_CarmTransformParameters.f / res.x[13];
+
+}
+
+
+// 优化所有参数：rx,ry,rz,tx,ty,tz,k1,k2,p1,p2,s1,s3,dx,dy,u0,v0
+void RefineTsai7(std::vector<cv::Vec3d>& markers3DPoints, std::vector<cv::Vec2d>& image2DPoints)
+{
+    auto obj = [=](ppx::MatrixS<16, 1> x) {
+        double _Rx = x[0];
+        double _Ry = x[1];
+        double _Rz = x[2];
+
+        double tx = x[3];
+        double ty = x[4];
+        double tz = x[5];
+
+        double k1 = x[6];
+        double k2 = x[7];
+
+        double p1 = x[8];
+        double p2 = x[9];
+
+        double s1 = x[10];
+        double s3 = x[11];
+
+        double dx = x[12];
+        double dy = x[13];
+
+        double u0 = x[14];
+        double v0 = x[15];
+
+        double value = 0.0;
+        cv::Mat rm = angle2mat(_Rx, _Ry, _Rz);
+        for (size_t i = 0; i < markers3DPoints.size(); i++)
+        {
+            cv::Vec3f p = markers3DPoints[i];
+            double zc = rm.at<double>(2, 0) * p[0] + rm.at<double>(2, 1) * p[1] + rm.at<double>(2, 2) * p[2] + tz;
+            double xu = (rm.at<double>(0, 0) * p[0] + rm.at<double>(0, 1) * p[1] + rm.at<double>(0, 2) * p[2] + tx) / zc;
+            double yu = (rm.at<double>(1, 0) * p[0] + rm.at<double>(1, 1) * p[1] + rm.at<double>(1, 2) * p[2] + ty) / zc;
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs + k2 * rs * rs) + 2 * p1 * xu * yu + p2 * (rs + 2 * xu * xu) + s1 * rs;
+            double y_pie = yu * (1 + k1 * rs + k2 * rs * rs) + p1 * (rs + 2 * yu * yu) + 2 * p2 * xu * yu + s3 * rs;
+
+            double u = m_CarmTransformParameters.f / dx * x_pie + u0;
+            double v = m_CarmTransformParameters.f / dy * y_pie + v0;
+
+            value += (u - image2DPoints[i][0]) * (u - image2DPoints[i][0]) + (v - image2DPoints[i][1]) * (v - image2DPoints[i][1]);
+        }
+        return value;
+    };
+
+    std::array<double, 3> angles = mat2angle(m_CarmTransformParameters.rotation_matrix);
+    ppx::MatrixS<16, 1> x0 = {
+        angles[0],
+        angles[1],
+        angles[2],
+        m_CarmTransformParameters.translation_vector.at<double>(0,0),
+        m_CarmTransformParameters.translation_vector.at<double>(1,0),
+        m_CarmTransformParameters.translation_vector.at<double>(2,0),
+        m_CarmTransformParameters.k1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        m_CarmTransformParameters.image_spacing[0],
+        m_CarmTransformParameters.image_spacing[1],
+        m_CarmTransformParameters.u0,
+        m_CarmTransformParameters.v0
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+
+    m_CarmTransformParameters.rotation_matrix = angle2mat(res.x[0], res.x[1], res.x[2]);
+    m_CarmTransformParameters.translation_vector = (cv::Mat_<double>(3, 1) << res.x[3], res.x[4], res.x[5]);
+    m_CarmTransformParameters.k1 = res.x[6];
+    m_CarmTransformParameters.k2 = res.x[7];
+    m_CarmTransformParameters.p1 = res.x[8];
+    m_CarmTransformParameters.p2 = res.x[9];
+    m_CarmTransformParameters.s1 = res.x[10];
+    m_CarmTransformParameters.s3 = res.x[11];
+
+    m_CarmTransformParameters.image_spacing[0] = res.x[12];
+    m_CarmTransformParameters.image_spacing[1] = res.x[13];
+
+    m_CarmTransformParameters.kx = m_CarmTransformParameters.f / res.x[12];
+    m_CarmTransformParameters.ky = m_CarmTransformParameters.f / res.x[13];
+
+    m_CarmTransformParameters.u0 = res.x[14];
+    m_CarmTransformParameters.v0 = res.x[15];
+
+}
+
+void test_1();
+
+void test_2();
+
+int main___()
+{
+
+    test_1();
+
+    getchar();
+
+    std::vector<cv::Vec3d> points3D;
+    std::vector<cv::Vec2d> points2D;
+
+    set_inner_data(points3D, points2D);
+
+    std::cout << "\nCalibration by Tsai without any distortion:=========================" << std::endl;
+    Tsai(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStat(points3D, points2D);
+
+    std::cout << "\nCalibration by Tsai only k1 distortion:=============================" << std::endl;
+    RefineTsai(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStat(points3D, points2D);
+
+    //set_data(points3D, points2D);
+
+    //std::cout << "\nCalibration by Tsai with k1 distortion and u0,v0 offset:============" << std::endl;
+    //RefineTsai2(points3D, points2D);
+    //std::cout << m_CarmTransformParameters << std::endl;
+    //ProjectErrorStat(points3D, points2D);
+
+    set_data(points3D, points2D);
+    std::cout << "\nCalibration by Tsai with k1 distortion and u0,v0 optimization:============" << std::endl;
+    RefineTsai3(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStatOpenCV(points3D, points2D);
+
+
+    for (size_t i = 0; i < 3; i++)
+    {
+        std::cout << "\nCalibration by Tsai with R, T and distortion  optimization:============" << std::endl;
+        RefineTsai4(points3D, points2D);
+        std::cout << m_CarmTransformParameters << std::endl;
+        ProjectErrorStatOpenCV(points3D, points2D);
+
+        std::cout << "\nCalibration by Tsai with dy,dy,u0,v0 optimization:============" << std::endl;
+        RefineTsai5(points3D, points2D);
+        std::cout << m_CarmTransformParameters << std::endl;
+        ProjectErrorStatOpenCV(points3D, points2D);
+    }
+
+
+    
+
+    
+
+    return 0;
+}
+
+
+
+// CN专利方式
+void test_1()
+{
+    double image_w = 1024;
+    double image_h = 1024;
+    // 内参
+    double f = 1011;
+    double dx =0.209, dy = 0.209;
+    double u0 = 505, v0 = 509.1;
+
+    // 外参
+    double rx = 0.001;
+    double ry = -0.001;
+    double rz = 0.002;
+
+    double tx = 10;
+    double ty = -10;
+    double tz = 950;
+
+    // 畸变参数
+    double k1 = 5;
+    double k2 = 100;
+    double p1 = -0.01;
+    double p2 = -0.01;
+    double s1 = -0.02;
+    double s3 = 0.01;
+
+
+    cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << f / dx, 0, u0, 0, f / dy, v0, 0, 0, 1);
+    cv::Mat camera_matrix_undistortion = (cv::Mat_<double>(3, 3) << f / dx, 0, (image_w - 1.0) / 2, 0, f / dy, (image_h - 1.0) / 2, 0, 0, 1);
+    cv::Mat rotation = angle2mat(rx, ry, rz);
+    cv::Mat rvec = (cv::Mat_<double>(3, 1) << rz, ry, rz);
+    cv::Mat translation = (cv::Mat_<double>(3, 1) << tx, ty, tz);
+
+    // k1,k2,p1,p2,k3,k4,k5,k6,s1,s2,s3,s4
+    cv::Mat distortion_coeff = (cv::Mat_<double>(12, 1) << k1, k2, p1, p2, 0, 0, 0, 0, s1, 0, s3, 0);
+
+    std::vector<cv::Vec3d> points3D =
+    {
+#include "marker3d.data"
+    };
+
+    std::vector<cv::Vec2d> points2D, points2D_undistortion;
+    cv::projectPoints(points3D, rvec, translation, camera_matrix, distortion_coeff, points2D);
+    cv::projectPoints(points3D, rvec, translation, camera_matrix_undistortion, cv::Mat(), points2D_undistortion);
+
+    cv::Mat preview(1024, 1024, CV_8UC3);
+    for (size_t i = 0; i < points2D.size(); i++)
+    {
+        cv::circle(preview, cv::Point(points2D[i]), 10, cv::Scalar(0, 0, 255), 2);
+        cv::circle(preview, cv::Point(points2D_undistortion[i]), 10, cv::Scalar(255, 0, 255), 2);
+    }
+    cv::imshow("preview", preview);
+    cv::waitKey(0);
+
+
+
+
+
+
+
+    std::cout << "\nCalibration by Tsai without any distortion:=========================" << std::endl;
+    Tsai(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStat(points3D, points2D);
+
+    std::cout << "\nCalibration by Tsai only k1 distortion:=============================" << std::endl;
+    RefineTsai(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStat(points3D, points2D);
+
+    //set_data(points3D, points2D);
+
+    //std::cout << "\nCalibration by Tsai with k1 distortion and u0,v0 offset:============" << std::endl;
+    //RefineTsai2(points3D, points2D);
+    //std::cout << m_CarmTransformParameters << std::endl;
+    //ProjectErrorStat(points3D, points2D);
+
+    //set_data(points3D, points2D);
+    std::cout << "\nCalibration by Tsai with k1 distortion and u0,v0 optimization:============" << std::endl;
+    RefineTsai3(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStatOpenCV(points3D, points2D);
+
+
+    for (size_t i = 0; i < 3; i++)
+    {
+        std::cout << "\nCalibration by Tsai with R, T and distortion  optimization:============" << std::endl;
+        RefineTsai4(points3D, points2D);
+        std::cout << m_CarmTransformParameters << std::endl;
+        ProjectErrorStatOpenCV(points3D, points2D);
+
+        std::cout << "\nCalibration by Tsai with dy,dy,u0,v0 optimization:============" << std::endl;
+        RefineTsai5(points3D, points2D);
+        std::cout << m_CarmTransformParameters << std::endl;
+        ProjectErrorStatOpenCV(points3D, points2D);
+    }
+
+    std::vector<cv::Vec2d> points2D_u;
+    cv::Mat d = (cv::Mat_<double>(12, 1) << m_CarmTransformParameters.k1, m_CarmTransformParameters.k2, // k1,k2
+        m_CarmTransformParameters.p1, m_CarmTransformParameters.p2,                                     // p1,p2
+        0, 0, 0, 0,                                                                                     // k3,k4,k5,k6
+        m_CarmTransformParameters.s1, 0, m_CarmTransformParameters.s3, 0);                              // s1,s2,s3,s4
+
+    cv::Mat camera_matrix_u =
+        (cv::Mat_<double>(3, 3) << m_CarmTransformParameters.kx, 0, m_CarmTransformParameters.u0,
+            0, m_CarmTransformParameters.ky, m_CarmTransformParameters.v0,
+            0, 0, 1);
+
+    cv::undistortPoints(points2D, points2D_u, camera_matrix_u, d, cv::Mat(), camera_matrix_undistortion);
+
+    auto angles = mat2angle(m_CarmTransformParameters.rotation_matrix);
+    rvec = (cv::Mat_<double>(3, 1) << angles[0], angles[1], angles[2]);
+    cv::projectPoints(points3D, rvec, m_CarmTransformParameters.translation_vector, camera_matrix_undistortion, cv::Mat(), points2D_undistortion);
+
+    cv::Mat preview2(1024, 1024, CV_8UC3);
+    for (size_t i = 0; i < points2D.size(); i++)
+    {
+        cv::circle(preview2, cv::Point(points2D_u[i]), 10, cv::Scalar(0, 0, 255), -1);
+        cv::circle(preview2, cv::Point(points2D_undistortion[i]), 10, cv::Scalar(255, 0, 255), 2); 
+        std::cout << "Distance = " << cv::norm(points2D_u[i] - points2D_undistortion[i]) << std::endl;
+    }
+    cv::imshow("preview2", preview2);
+    cv::waitKey(0);
+
+}
+
+
+// pyTsai方式
+void test_2()
+{
+    double image_w = 1024;
+    double image_h = 1024;
+    // 内参
+    double f = 1011;
+    double dx = 0.209, dy = 0.209;
+    double u0 = 505, v0 = 509.1;
+
+    // 外参
+    double rx = 0.001;
+    double ry = -0.001;
+    double rz = 0.002;
+
+    double tx = 10;
+    double ty = -10;
+    double tz = 950;
+
+    // 畸变参数
+    double k1 = 5;
+    double k2 = 100;
+    double p1 = -0.01;
+    double p2 = -0.01;
+    double s1 = -0.02;
+    double s3 = 0.01;
+
+
+    cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << f / dx, 0, u0, 0, f / dy, v0, 0, 0, 1);
+    cv::Mat camera_matrix_undistortion = (cv::Mat_<double>(3, 3) << f / dx, 0, (image_w - 1.0) / 2, 0, f / dy, (image_h - 1.0) / 2, 0, 0, 1);
+    cv::Mat rotation = angle2mat(rx, ry, rz);
+    cv::Mat rvec = (cv::Mat_<double>(3, 1) << rz, ry, rz);
+    cv::Mat translation = (cv::Mat_<double>(3, 1) << tx, ty, tz);
+
+    // k1,k2,p1,p2,k3,k4,k5,k6,s1,s2,s3,s4
+    cv::Mat distortion_coeff = (cv::Mat_<double>(12, 1) << k1, k2, p1, p2, 0, 0, 0, 0, s1, 0, s3, 0);
+
+    std::vector<cv::Vec3d> points3D =
+    {
+#include "marker3d.data"
+    };
+
+    std::vector<cv::Vec2d> points2D, points2D_undistortion;
+    cv::projectPoints(points3D, rvec, translation, camera_matrix, distortion_coeff, points2D);
+    cv::projectPoints(points3D, rvec, translation, camera_matrix_undistortion, cv::Mat(), points2D_undistortion);
+
+    cv::Mat preview(1024, 1024, CV_8UC3);
+    for (size_t i = 0; i < points2D.size(); i++)
+    {
+        cv::circle(preview, cv::Point(points2D[i]), 10, cv::Scalar(0, 0, 255), 2);
+        cv::circle(preview, cv::Point(points2D_undistortion[i]), 10, cv::Scalar(255, 0, 255), 2);
+    }
+    cv::imshow("preview", preview);
+    cv::waitKey(0);
+
+
+
+    std::cout << "\nCalibration by Tsai without any distortion:=========================" << std::endl;
+    Tsai(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStat(points3D, points2D);
+
+    std::cout << "\nCalibration by Tsai only k1 distortion:=============================" << std::endl;
+    RefineTsai(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStat(points3D, points2D);
+
+
+    std::cout << "\nCalibration by Tsai without optical center offset:=============================" << std::endl;
+    RefineTsai6(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStatOpenCV(points3D, points2D);
+
+
+    std::cout << "\nCalibration by Tsai full optimazation:=============================" << std::endl;
+    RefineTsai7(points3D, points2D);
+    std::cout << m_CarmTransformParameters << std::endl;
+    ProjectErrorStatOpenCV(points3D, points2D);
+
+
+    std::vector<cv::Vec2d> points2D_u;
+    cv::Mat d = (cv::Mat_<double>(12, 1) << m_CarmTransformParameters.k1, m_CarmTransformParameters.k2, // k1,k2
+        m_CarmTransformParameters.p1, m_CarmTransformParameters.p2,                                     // p1,p2
+        0, 0, 0, 0,                                                                                     // k3,k4,k5,k6
+        m_CarmTransformParameters.s1, 0, m_CarmTransformParameters.s3, 0);                              // s1,s2,s3,s4
+
+    cv::Mat camera_matrix_u =
+        (cv::Mat_<double>(3, 3) << m_CarmTransformParameters.kx, 0, m_CarmTransformParameters.u0,
+            0, m_CarmTransformParameters.ky, m_CarmTransformParameters.v0,
+            0, 0, 1);
+
+    cv::undistortPoints(points2D, points2D_u, camera_matrix_u, d, cv::Mat(), camera_matrix_undistortion);
+
+    auto angles = mat2angle(m_CarmTransformParameters.rotation_matrix);
+    rvec = (cv::Mat_<double>(3, 1) << angles[0], angles[1], angles[2]);
+    cv::projectPoints(points3D, rvec, m_CarmTransformParameters.translation_vector, camera_matrix_undistortion, cv::Mat(), points2D_undistortion);
+
+    cv::Mat preview2(1024, 1024, CV_8UC3);
+    for (size_t i = 0; i < points2D.size(); i++)
+    {
+        cv::circle(preview2, cv::Point(points2D_u[i]), 10, cv::Scalar(0, 0, 255), -1);
+        cv::circle(preview2, cv::Point(points2D_undistortion[i]), 10, cv::Scalar(255, 0, 255), 2);
+        std::cout << "Distance = " << cv::norm(points2D_u[i] - points2D_undistortion[i]) << std::endl;
+    }
+    cv::imshow("preview2", preview2);
+    cv::waitKey(0);
+
+}

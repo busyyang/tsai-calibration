@@ -85,7 +85,10 @@ public:
 
 	void SetPoints3D(const std::vector<cv::Vec3d>& _arg) { m_Points3D = _arg; }
 	void SetPoints2D(const std::vector<cv::Vec2d>& _arg) { m_Points2D = _arg; }
-    void SetInnerIndex(const std::vector<int>& _arg) { m_InnerIndex = _arg; }
+
+    void SetInnerPoints3D(const std::vector<cv::Vec3d>& _arg) { m_InnerPoints3D = _arg; }
+    void SetInnerPoints2D(const std::vector<cv::Vec2d>& _arg) { m_InnerPoints2D = _arg; }
+    
     void Setf(const double& _arg) { m_Parameters.f = _arg; }
 
     void SetImageSize(const int& width, const int& height);
@@ -97,6 +100,8 @@ public:
 
     double GetProjectionError();
     CameraParameters GetCalibratedParameters() { return m_Parameters; }
+    std::vector<cv::Vec2d> GetUndistortionProjectedPoints();
+    std::vector<cv::Vec2d> GetUndistortedPoints();
     cv::Mat UndistortImage(const cv::Mat& mat);
 
 private:
@@ -116,7 +121,9 @@ private:
 	std::vector<cv::Vec3d> m_Points3D;
 	std::vector<cv::Vec2d> m_Points2D;
 
-    std::vector<int> m_InnerIndex;
+    // only valid for FiveStepMethod
+    std::vector<cv::Vec3d> m_InnerPoints3D;
+    std::vector<cv::Vec2d> m_InnerPoints2D;
 
     CameraParameters m_Parameters;
 };
