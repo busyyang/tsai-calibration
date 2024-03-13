@@ -1,0 +1,122 @@
+#pragma once
+
+#include <vector>
+#include <opencv2/opencv.hpp>
+
+
+struct CameraParameters
+{
+    int image_width;
+    int image_height;
+    cv::Mat rotation_matrix; /* the rotation matrix from physical coordinate to camera coordinate. */
+    cv::Mat translation_vector; /* the translation vector from physical coordinate to camera coordinate. */
+    cv::Vec3d image_spacing; /* the spacing of x-ray image. */
+    double k1; /*1st order radial distortion coeffient*/
+    double k2; /*2nd order radial distortion coeffient*/
+    double p1; /*1st order tangential distortion coeffient*/
+    double p2; /*2nd order tangential distortion coeffient*/
+    double s1; /*1st order thin prism distortion coeffient for x*/
+    double s3; /*1st order thin prism distortion coeffient for y*/
+    double f; /* the distance between x-ray source and detector.*/
+    double kx;
+    double ky;
+    double u0;
+    double v0;
+    CameraParameters() :
+        k1(0), kx(0), ky(0), u0(0), v0(0), f(1011) {};
+
+    friend std::ostream& operator<<(std::ostream& os, const CameraParameters& para)
+    {
+        os << "Carm Transform Parameter: " << std::endl;
+        os << "\tf = " << para.f << std::endl;
+        os << "\tkx = " << para.kx << std::endl;
+        os << "\tky = " << para.ky << std::endl;
+        os << "\tTranslation Vector = " << para.translation_vector.t() << std::endl;
+        os << "\tImage Spacing = " << para.image_spacing << std::endl;
+        os << "\tsx = " << para.image_spacing[1] / para.image_spacing[0] << std::endl;
+        os << "\tu0 = " << para.u0 << std::endl;
+        os << "\tv0 = " << para.v0 << std::endl;
+        os << "\tdx = " << para.image_spacing[0] << std::endl;
+        os << "\tdy = " << para.image_spacing[1] << std::endl;
+        os << "\tk1 = " << para.k1 << std::endl;
+        os << "\tk2 = " << para.k2 << std::endl;
+        os << "\tp1 = " << para.p1 << std::endl;
+        os << "\tp2 = " << para.p2 << std::endl;
+        os << "\ts1 = " << para.s1 << std::endl;
+        os << "\ts3 = " << para.s3 << std::endl;
+
+
+
+        return os;
+    }
+};
+
+
+
+/**
+ * @brief Linear and non-linear optimization for camera calibration by Tsai Step-2 method.
+ * This code is only support non-coplaner 3D points.
+ * all non-linear optimization follow the basic formula as below:
+ *   $\begin{cases}
+      x_u=\frac{R_{11}X_w+R_{12}Y_w+R_{13}Z_w+T_x}{R_{31}X_w+R_{32}Y_w+R_{33}Z_w+T_z},
+      y_u=\frac{R_{21}X_w+R_{22}Y_w+R_{23}Z_w+T_y}{R_{31}X_w+R_{32}Y_w+R_{33}Z_w+T_z}\\
+      x^{''}=x_u(1+k_1r^2+k_2r^4)+2p_1x_uy_u+p_2(r^2+2x_u^2)+s_1r^2+s_2r^4\\
+      y^{''}=y_u(1+k_1r^2+k_2r^4)+p_1(r^2+2y_u^2)+2p_2x_uy_u+s_3r^2+s_4r^4\\
+      u \rightarrow \frac{f}{d_x}x^{''}+c_x,v \rightarrow \frac{f}{d_y}y^{''}+c_y\\
+      ......\\
+      J=\sqrt{||u-(\frac{f}{d_x}x^{''}+c_x)||^2+||v-(\frac{f}{d_y}y^{''}+c_y)||^2}\\
+      \text{where: } r^2=x_u^2+y_u^2
+    \end{cases}$
+    where (Xw,Yw,Zw) notes the 3D points, and (u,v) notes the distorted image pixel.
+ * 
+*/
+class TsaiCalibration
+{
+public:
+
+    enum CalibrationType
+    {
+        ThreeStepOptimation=0, // 
+        FiveStepOptimization
+    };
+
+	TsaiCalibration();
+	~TsaiCalibration();
+
+	void SetPoints3D(const std::vector<cv::Vec3d>& _arg) { m_Points3D = _arg; }
+	void SetPoints2D(const std::vector<cv::Vec2d>& _arg) { m_Points2D = _arg; }
+    void SetInnerIndex(const std::vector<int>& _arg) { m_InnerIndex = _arg; }
+    void Setf(const double& _arg) { m_Parameters.f = _arg; }
+
+    void SetImageSize(const int& width, const int& height);
+
+	bool Execute(CalibrationType type);
+
+    static cv::Mat Angle2RotationMat(const double& Rx, const double& Ry, const double& Rz);
+    static std::array<double, 3> RotationMat2Angle(const cv::Mat& rm);
+
+    double GetProjectionError();
+    CameraParameters GetCalibratedParameters() { return m_Parameters; }
+    cv::Mat UndistortImage(const cv::Mat& mat);
+
+private:
+
+    bool ThreeStepCalibration();
+    bool FiveStepCalibration();
+
+    bool Tsai(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D);
+    void RefineTsai(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D);
+    void RefineTsaiWithOpticalCenter(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D);
+    void RefineExternalParameters(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D);
+    void RefineIntermalParameters(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D);
+    void RefineWithoutOpticalCenter(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D);
+    void RefineFullParamters(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D);
+
+private:
+	std::vector<cv::Vec3d> m_Points3D;
+	std::vector<cv::Vec2d> m_Points2D;
+
+    std::vector<int> m_InnerIndex;
+
+    CameraParameters m_Parameters;
+};

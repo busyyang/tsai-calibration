@@ -1,0 +1,772 @@
+
+#include "TsaiCalibration.h.xyzh"
+#include "matrixs/matrixs.hpp"
+#include "matrixs/optimization.hpp"
+
+TsaiCalibration::TsaiCalibration()
+{
+    m_Parameters.f = 1011;
+}
+
+TsaiCalibration::~TsaiCalibration()
+{
+}
+
+cv::Mat TsaiCalibration::Angle2RotationMat(const double& Rx, const double& Ry, const double& Rz)
+{
+    double sa = sin(Rx);
+    double ca = cos(Rx);
+    double sb = sin(Ry);
+    double cb = cos(Ry);
+    double sg = sin(Rz);
+    double cg = cos(Rz);
+
+    cv::Mat rm(3, 3, CV_64FC1);
+
+    rm.at<double>(0, 0) = cb * cg;
+    rm.at<double>(0, 1) = cg * sa * sb - ca * sg;
+    rm.at<double>(0, 2) = sa * sg + ca * cg * sb;
+    rm.at<double>(1, 0) = cb * sg;
+    rm.at<double>(1, 1) = sa * sb * sg + ca * cg;
+    rm.at<double>(1, 2) = ca * sb * sg - cg * sa;
+    rm.at<double>(2, 0) = -sb;
+    rm.at<double>(2, 1) = cb * sa;
+    rm.at<double>(2, 2) = ca * cb;
+
+    return rm;
+}
+
+std::array<double, 3> TsaiCalibration::RotationMat2Angle(const cv::Mat& rm)
+{
+    double r1, r2, r3, r4, r5, r6, r7, sg, cg;
+    if (rm.empty() || rm.cols != 3 || rm.cols != 3)
+    {
+        return {};
+    }
+    r1 = rm.at<double>(0, 0);
+    r2 = rm.at<double>(0, 1);
+    r3 = rm.at<double>(0, 2);
+    r4 = rm.at<double>(1, 0);
+    r5 = rm.at<double>(1, 1);
+    r6 = rm.at<double>(1, 2);
+    r7 = rm.at<double>(2, 0);
+
+    double Rz = atan2(r4, r1);
+    sg = sin(Rz);
+    cg = cos(Rz);
+    double Ry = atan2(-r7, r1 * cg + r4 * sg);
+    double Rx = atan2(r3 * sg - r6 * cg, r5 * cg - r2 * sg);
+
+    return { Rx,Ry,Rz };
+}
+
+
+bool TsaiCalibration::ThreeStepCalibration()
+{
+    //Step 1
+    if (!Tsai(m_Points3D, m_Points2D)) // linear Tsai part
+    {
+        return false;
+    }
+    RefineTsai(m_Points3D, m_Points2D);                   // non-linear Tsai part
+    // Step 2-3
+    RefineWithoutOpticalCenter(m_Points3D, m_Points2D);   // non-linear optimization for internal and external parameters expect u0,v0
+    RefineFullParamters(m_Points3D, m_Points2D);          // non-linear optimization for all parameters
+    return true;
+}
+
+bool TsaiCalibration::FiveStepCalibration()
+{
+    std::vector<cv::Vec3d> inner3D;
+    std::vector<cv::Vec2d> inner2D;
+    
+    for (const auto i :m_InnerIndex)
+    {
+        inner3D.push_back(m_Points3D[i]);
+        inner2D.push_back(m_Points2D[i]);
+    }
+    // Step1
+    if (!Tsai(inner3D,inner2D))        // linear Tsai part
+    {
+        return false;
+    }
+    RefineTsai(inner3D, inner2D);                           // non-linear Tsai part
+    RefineTsaiWithOpticalCenter(inner3D, inner2D);          // non-linear Tsai part with optical center
+    // Step 2-3
+    RefineExternalParameters(inner3D, inner2D);             // non-linear optimization for external and distortion parameters with centered points
+    RefineIntermalParameters(inner3D, inner2D);             // non-linear optimization for inner parameters with centered points
+    // Step 4-5
+    RefineExternalParameters(m_Points3D, m_Points2D);       // non-linear optimization for external and distortion parameters with all points
+    RefineIntermalParameters(m_Points3D, m_Points2D);       // non-linear optimization for inner parameters with all points
+    return true;
+}
+
+bool TsaiCalibration::Execute(CalibrationType type)
+{
+	if (type == CalibrationType::ThreeStepOptimation)
+	{
+		return ThreeStepCalibration();
+	}
+	else
+	{
+		return FiveStepCalibration();
+	}
+}
+
+
+/**
+ * @brief Calibration with linear Tsai method, for detail please refer: 
+ * Tsai R. A versatile camera calibration technique for high-accuracy 3D
+ * machine vision metrology using off-the-shelf TV cameras and lenses[J]. 
+ * IEEE Journal on Robotics and Automation, 1987, 3(4): 323-344.
+ * @return 
+*/
+bool TsaiCalibration::Tsai(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D)
+{
+    if (points3D.size() != points2D.size())
+    {
+        return false;
+    }
+    if (points3D.size() < 7)
+    {
+        return false;
+    }
+    int size = points3D.size();
+    // compute r11,r12,r13,r21,r22,r23,Tx,Ty
+    double offset_x = (m_Parameters.image_width - 1.0) / 2.0;
+    double offset_y = (m_Parameters.image_height - 1.0) / 2.0;
+
+    cv::Vec3d spacing = m_Parameters.image_spacing;
+
+    cv::Mat A = cv::Mat_<double>(size, 7);
+    cv::Mat B = cv::Mat_<double>(size, 1);
+    for (size_t i = 0; i < size; i++)
+    {
+        double xi = (points2D[i][0] - offset_x);
+        double yi = (points2D[i][1] - offset_y);
+
+        A.at<double>(i, 0) = xi * points3D[i][0];
+        A.at<double>(i, 1) = xi * points3D[i][1];
+        A.at<double>(i, 2) = xi * points3D[i][2];
+        A.at<double>(i, 3) = -yi * points3D[i][0];
+        A.at<double>(i, 4) = -yi * points3D[i][1];
+        A.at<double>(i, 5) = -yi * points3D[i][2];
+        A.at<double>(i, 6) = -yi;
+
+        B.at<double>(i, 0) = -xi;
+    }
+    cv::Mat V = (A.t() * A).inv() * A.t() * B;//[r21/Ty,r22/Ty,r23/Ty,alpha*r11/Ty,alpha*r12/Ty,alpha*r13/Ty,alpha*Tx/Ty]
+    double TySquare = 1.0 / (pow(V.at<double>(0, 0), 2) + pow(V.at<double>(1, 0), 2) + pow(V.at<double>(2, 0), 2));
+
+    // get the sign of Ty
+    double far_distance = 0.0;
+    int far_idx = 0;
+    for (size_t i = 0; i < size; i++)
+    {
+        double xi = (points2D[i][0] - offset_x);
+        double yi = (points2D[i][1] - offset_y);
+        double r = xi * xi + yi * yi;
+        if (r > far_distance)
+        {
+            far_distance = r;
+            far_idx = i;
+        }
+    }
+    // yi=y-offset_y 与Yc=r_21*x_w+r_22*y_w+r_23*z_w+Ty应该是同符号的。yi*Yc>0.
+    // 假设Ty>0有： yi*(Yc/Ty)>0，否则Ty>0的假设不成立。
+    double sign = (points2D[far_idx][1] - offset_y) * (
+        V.at<double>(0, 0) * points3D[far_idx][0] +
+        V.at<double>(1, 0) * points3D[far_idx][1] +
+        V.at<double>(2, 0) * points3D[far_idx][2]
+        + 1
+        );
+    double Ty = sqrt(TySquare);
+    if (sign < 0)
+    {
+        Ty = -Ty;
+    }
+    cv::Mat r2 = (V.rowRange(0, 3) * Ty).t(); // to row vector
+    double alpha = cv::norm(V.rowRange(3, 6) * Ty);
+    cv::Mat r1 = (V.rowRange(3, 6) * Ty / alpha).t();  // to row vector
+    double Tx = V.at<double>(6, 0) * Ty / alpha;
+    cv::Mat r3 = r1.cross(r2);
+    cv::Mat R;
+    cv::vconcat(std::vector<cv::Mat>{r1, r2, r3}, R);
+
+
+    // compute fx,fy,Tz
+    cv::Mat AA = cv::Mat_<double>(size, 2);
+    cv::Mat BB = cv::Mat_<double>(size, 1);
+    for (size_t i = 0; i < size; i++)
+    {
+        cv::Mat matp3d = (cv::Mat_<double>(1, 3) << points3D[i][0],
+            points3D[i][1], points3D[i][2]);
+        double xi = points2D[i][0] - offset_x;
+        double yi = points2D[i][1] - offset_y;
+
+        AA.at<double>(i, 0) = r2.dot(matp3d) + Ty;
+        AA.at<double>(i, 1) = -yi;
+        BB.at<double>(i, 0) = yi * r3.dot(matp3d);
+
+    }
+
+    cv::Mat matKyTz = (AA.t() * AA).inv() * (AA.t() * BB);
+    double ky = matKyTz.at<double>(0, 0);
+    double Tz = matKyTz.at<double>(1, 0);
+    double kx = ky * alpha;
+
+    // 固定SID标定内参
+    double f = m_Parameters.f;
+    double dx = m_Parameters.f / kx;
+    double dy = m_Parameters.f / ky;
+
+    cv::Mat T = (cv::Mat_<double>(3, 1) << Tx, Ty, Tz);
+    cv::Mat camera_pose = -R.t() * T;
+
+    // the origin of pixel coordinate located in the left-up corner, which is on the negitive side of X and Y axis.
+    cv::Mat origin_camera_coordinate = (cv::Mat_<double>(3, 1) << 0.0 - offset_x * dx, 0.0 - offset_y * dy, f);
+    cv::Mat image_origin = R.t() * (origin_camera_coordinate - T);
+
+
+    m_Parameters.f = f;
+    m_Parameters.kx = kx;
+    m_Parameters.ky = ky;
+    m_Parameters.u0 = offset_x;
+    m_Parameters.v0 = offset_y;
+    m_Parameters.rotation_matrix = R;
+    m_Parameters.translation_vector = T;
+    m_Parameters.image_spacing = cv::Vec3d(dx, dy, 1);
+
+    return true;
+}
+
+/**
+ * @brief Refine kx/ky, Tz and k1 for Linear Tsai Method. This is the second 
+ * step for original paper, for detail please refer: 
+ * Tsai R. A versatile camera calibration technique for high-accuracy 3D
+ * machine vision metrology using off-the-shelf TV cameras and lenses[J]. 
+ * IEEE Journal on Robotics and Automation, 1987, 3(4): 323-344.
+ * @return 
+*/
+void TsaiCalibration::RefineTsai(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D)
+{
+    double tx = m_Parameters.translation_vector.at<double>(0, 0);
+    double ty = m_Parameters.translation_vector.at<double>(1, 0);
+
+    auto r1 = m_Parameters.rotation_matrix.rowRange(0, 1);
+    auto r2 = m_Parameters.rotation_matrix.rowRange(1, 2);
+    auto r3 = m_Parameters.rotation_matrix.rowRange(2, 3);
+    std::vector<double> r1p, r2p, r3p;
+    std::transform(points3D.begin(), points3D.end(), std::back_inserter(r1p),
+        [=](auto p) {return r1.at<double>(0, 0) * p[0] + r1.at<double>(0, 1) * p[1] + r1.at<double>(0, 2) * p[2]; });
+    std::transform(points3D.begin(), points3D.end(), std::back_inserter(r2p),
+        [=](auto p) {return r2.at<double>(0, 0) * p[0] + r2.at<double>(0, 1) * p[1] + r2.at<double>(0, 2) * p[2]; });
+    std::transform(points3D.begin(), points3D.end(), std::back_inserter(r3p),
+        [=](auto p) {return r3.at<double>(0, 0) * p[0] + r3.at<double>(0, 1) * p[1] + r3.at<double>(0, 2) * p[2]; });
+
+
+    auto obj = [=](const ppx::MatrixS<4, 1>& x)
+    {
+        double k1 = x[0];
+        double dx = x[1];
+        double dy = x[2];
+        double tz = x[3];
+        double value = 0, vx = 0, vy = 0;
+        for (size_t i = 0; i < points3D.size(); i++)
+        {
+            double xc = (points2D[i][0] - m_Parameters.u0) * dx;
+            double yc = (points2D[i][1] - m_Parameters.v0) * dy;
+            double r2 = xc * xc + yc * yc;
+            vx += std::pow(xc * (1 + k1 * r2) * (r3p[i] + tz) - m_Parameters.f * (r1p[i] + tx), 2);
+            vy += std::pow(yc * (1 + k1 * r2) * (r3p[i] + tz) - m_Parameters.f * (r2p[i] + ty), 2);
+        }
+        value = std::sqrt(vx) + std::sqrt(vy);
+
+        return value;
+    };
+    ppx::MatrixS<4, 1> x0{ 0.0,
+        (double)m_Parameters.image_spacing[0],
+        (double)m_Parameters.image_spacing[1],
+        m_Parameters.translation_vector.at<double>(2, 0)
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+    m_Parameters.k1 = res.x[0];
+    m_Parameters.image_spacing = cv::Vec3d(res.x[1], res.x[2], 1);
+    m_Parameters.translation_vector.at<double>(2, 0) = res.x[3];
+    m_Parameters.kx = m_Parameters.f / res.x[1];
+    m_Parameters.ky = m_Parameters.f / res.x[2];
+}
+
+/**
+ * @brief Non-linear optimization dx,dy,Tz,k1 and optical center (u0,v0).
+ * This part could be viewed as an improved Step2 Tsai calibration, since 
+ * it optimized not only dx,dy,Tz and k1 but also u0,v0.
+*/
+void TsaiCalibration::RefineTsaiWithOpticalCenter(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D)
+{
+    double tx = m_Parameters.translation_vector.at<double>(0, 0);
+    double ty = m_Parameters.translation_vector.at<double>(1, 0);
+
+    auto r1 = m_Parameters.rotation_matrix.rowRange(0, 1);
+    auto r2 = m_Parameters.rotation_matrix.rowRange(1, 2);
+    auto r3 = m_Parameters.rotation_matrix.rowRange(2, 3);
+    std::vector<double> r1p, r2p, r3p;
+    std::transform(points3D.begin(), points3D.end(), std::back_inserter(r1p),
+        [=](auto p) {return r1.at<double>(0, 0) * p[0] + r1.at<double>(0, 1) * p[1] + r1.at<double>(0, 2) * p[2]; });
+    std::transform(points3D.begin(), points3D.end(), std::back_inserter(r2p),
+        [=](auto p) {return r2.at<double>(0, 0) * p[0] + r2.at<double>(0, 1) * p[1] + r2.at<double>(0, 2) * p[2]; });
+    std::transform(points3D.begin(), points3D.end(), std::back_inserter(r3p),
+        [=](auto p) {return r3.at<double>(0, 0) * p[0] + r3.at<double>(0, 1) * p[1] + r3.at<double>(0, 2) * p[2]; });
+
+
+    auto obj = [=](const ppx::MatrixS<6, 1>& x)
+    {
+        double k1 = x[0];
+        double dx = x[1];
+        double dy = x[2];
+        double tz = x[3];
+        double u0 = x[4];
+        double v0 = x[5];
+
+        double value = 0;
+        for (size_t i = 0; i < points3D.size(); i++)
+        {
+            double xu = (r1p[i] + tx) / (r3p[i] + tz);
+            double yu = (r2p[i] + ty) / (r3p[i] + tz);
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs);
+            double y_pie = yu * (1 + k1 * rs);
+
+            double u = m_Parameters.f / dx * x_pie + u0;
+            double v = m_Parameters.f / dy * y_pie + v0;
+
+            value += hypot(u - points2D[i][0], v - points2D[i][1]);
+        }
+        return value;
+    };
+
+    ppx::MatrixS<6, 1> x0{ // k1,dx,dy,Tz,u0,v0
+        0.0,
+        (double)m_Parameters.image_spacing[0],
+        (double)m_Parameters.image_spacing[1],
+        m_Parameters.translation_vector.at<double>(2,0),
+        m_Parameters.u0,
+        m_Parameters.v0
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+    m_Parameters.k1 = res.x[0];
+    m_Parameters.image_spacing = cv::Vec3d(res.x[1], res.x[2], 1);
+    m_Parameters.translation_vector.at<double>(2, 0) = res.x[3];
+    m_Parameters.kx = m_Parameters.f / res.x[1];
+    m_Parameters.ky = m_Parameters.f / res.x[2];
+
+    m_Parameters.u0 = res.x[4];
+    m_Parameters.v0 = res.x[5];
+}
+
+/**
+ * @brief non-linear optimization for internal and external parameters expect u0,v0. 
+ * The parameters for optimization includes: rx,ry,rz,tx,ty,tz,k1,k2,p1,p2,s1,s3,dy,dy
+ * @return 
+*/
+void TsaiCalibration::RefineWithoutOpticalCenter(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D)
+{
+    auto obj = [=](ppx::MatrixS<14, 1> x) {
+        double _Rx = x[0];
+        double _Ry = x[1];
+        double _Rz = x[2];
+
+        double tx = x[3];
+        double ty = x[4];
+        double tz = x[5];
+
+        double k1 = x[6];
+        double k2 = x[7];
+
+        double p1 = x[8];
+        double p2 = x[9];
+
+        double s1 = x[10];
+        double s3 = x[11];
+
+        double dx = x[12];
+        double dy = x[13];
+
+        double value = 0.0;
+        cv::Mat rm = Angle2RotationMat(_Rx, _Ry, _Rz);
+        for (size_t i = 0; i < points3D.size(); i++)
+        {
+            cv::Vec3f p = points3D[i];
+            double zc = rm.at<double>(2, 0) * p[0] + rm.at<double>(2, 1) * p[1] + rm.at<double>(2, 2) * p[2] + tz;
+            double xu = (rm.at<double>(0, 0) * p[0] + rm.at<double>(0, 1) * p[1] + rm.at<double>(0, 2) * p[2] + tx) / zc;
+            double yu = (rm.at<double>(1, 0) * p[0] + rm.at<double>(1, 1) * p[1] + rm.at<double>(1, 2) * p[2] + ty) / zc;
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs + k2 * rs * rs) + 2 * p1 * xu * yu + p2 * (rs + 2 * xu * xu) + s1 * rs;
+            double y_pie = yu * (1 + k1 * rs + k2 * rs * rs) + p1 * (rs + 2 * yu * yu) + 2 * p2 * xu * yu + s3 * rs;
+
+            double u = m_Parameters.f / dx * x_pie + m_Parameters.u0;
+            double v = m_Parameters.f / dy * y_pie + m_Parameters.v0;
+
+            value += (u - points2D[i][0]) * (u - points2D[i][0]) + (v - points2D[i][1]) * (v - points2D[i][1]);
+        }
+        return value;
+    };
+
+    std::array<double, 3> angles = RotationMat2Angle(m_Parameters.rotation_matrix);
+    // rx,ry,rz,tx,ty,tz,k1,k2,p1,p2,s1,s3,dy,dy
+    ppx::MatrixS<14, 1> x0 = {
+        angles[0],
+        angles[1],
+        angles[2],
+        m_Parameters.translation_vector.at<double>(0,0),
+        m_Parameters.translation_vector.at<double>(1,0),
+        m_Parameters.translation_vector.at<double>(2,0),
+        m_Parameters.k1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        m_Parameters.image_spacing[0],
+        m_Parameters.image_spacing[1]
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+
+    m_Parameters.rotation_matrix = Angle2RotationMat(res.x[0], res.x[1], res.x[2]);
+    m_Parameters.translation_vector = (cv::Mat_<double>(3, 1) << res.x[3], res.x[4], res.x[5]);
+    m_Parameters.k1 = res.x[6];
+    m_Parameters.k2 = res.x[7];
+    m_Parameters.p1 = res.x[8];
+    m_Parameters.p2 = res.x[9];
+    m_Parameters.s1 = res.x[10];
+    m_Parameters.s3 = res.x[11];
+
+    m_Parameters.image_spacing[0] = res.x[12];
+    m_Parameters.image_spacing[1] = res.x[13];
+
+    m_Parameters.kx = m_Parameters.f / res.x[12];
+    m_Parameters.ky = m_Parameters.f / res.x[13];
+}
+
+void TsaiCalibration::RefineFullParamters(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D)
+{
+    auto obj = [=](ppx::MatrixS<16, 1> x) {
+        double _Rx = x[0];
+        double _Ry = x[1];
+        double _Rz = x[2];
+
+        double tx = x[3];
+        double ty = x[4];
+        double tz = x[5];
+
+        double k1 = x[6];
+        double k2 = x[7];
+
+        double p1 = x[8];
+        double p2 = x[9];
+
+        double s1 = x[10];
+        double s3 = x[11];
+
+        double dx = x[12];
+        double dy = x[13];
+
+        double u0 = x[14];
+        double v0 = x[15];
+
+        double value = 0.0;
+        cv::Mat rm = Angle2RotationMat(_Rx, _Ry, _Rz);
+        for (size_t i = 0; i < points3D.size(); i++)
+        {
+            cv::Vec3f p = points3D[i];
+            double zc = rm.at<double>(2, 0) * p[0] + rm.at<double>(2, 1) * p[1] + rm.at<double>(2, 2) * p[2] + tz;
+            double xu = (rm.at<double>(0, 0) * p[0] + rm.at<double>(0, 1) * p[1] + rm.at<double>(0, 2) * p[2] + tx) / zc;
+            double yu = (rm.at<double>(1, 0) * p[0] + rm.at<double>(1, 1) * p[1] + rm.at<double>(1, 2) * p[2] + ty) / zc;
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs + k2 * rs * rs) + 2 * p1 * xu * yu + p2 * (rs + 2 * xu * xu) + s1 * rs;
+            double y_pie = yu * (1 + k1 * rs + k2 * rs * rs) + p1 * (rs + 2 * yu * yu) + 2 * p2 * xu * yu + s3 * rs;
+
+            double u = m_Parameters.f / dx * x_pie + u0;
+            double v = m_Parameters.f / dy * y_pie + v0;
+
+            value += (u - points2D[i][0]) * (u - points2D[i][0]) + (v - points2D[i][1]) * (v - points2D[i][1]);
+        }
+        return value;
+    };
+
+    std::array<double, 3> angles = RotationMat2Angle(m_Parameters.rotation_matrix);
+    ppx::MatrixS<16, 1> x0 = {
+        angles[0],
+        angles[1],
+        angles[2],
+        m_Parameters.translation_vector.at<double>(0,0),
+        m_Parameters.translation_vector.at<double>(1,0),
+        m_Parameters.translation_vector.at<double>(2,0),
+        m_Parameters.k1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        m_Parameters.image_spacing[0],
+        m_Parameters.image_spacing[1],
+        m_Parameters.u0,
+        m_Parameters.v0
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+
+    m_Parameters.rotation_matrix = Angle2RotationMat(res.x[0], res.x[1], res.x[2]);
+    m_Parameters.translation_vector = (cv::Mat_<double>(3, 1) << res.x[3], res.x[4], res.x[5]);
+    m_Parameters.k1 = res.x[6];
+    m_Parameters.k2 = res.x[7];
+    m_Parameters.p1 = res.x[8];
+    m_Parameters.p2 = res.x[9];
+    m_Parameters.s1 = res.x[10];
+    m_Parameters.s3 = res.x[11];
+
+    m_Parameters.image_spacing[0] = res.x[12];
+    m_Parameters.image_spacing[1] = res.x[13];
+
+    m_Parameters.kx = m_Parameters.f / res.x[12];
+    m_Parameters.ky = m_Parameters.f / res.x[13];
+
+    m_Parameters.u0 = res.x[14];
+    m_Parameters.v0 = res.x[15];
+}
+
+/**
+ * @brief Non-linear optimization for external and distortion parameters
+ * @param points3D 
+ * @param points2D 
+*/
+void TsaiCalibration::RefineExternalParameters(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D)
+{
+    auto obj = [=](ppx::MatrixS<12, 1> x) {
+        double _Rx = x[0];
+        double _Ry = x[1];
+        double _Rz = x[2];
+
+        double tx = x[3];
+        double ty = x[4];
+        double tz = x[5];
+
+        double k1 = x[6];
+        double k2 = x[7];
+
+        double p1 = x[8];
+        double p2 = x[9];
+
+        double s1 = x[10];
+        double s3 = x[11];
+
+        double value = 0.0;
+        cv::Mat rm = Angle2RotationMat(_Rx, _Ry, _Rz);
+        for (size_t i = 0; i < points3D.size(); i++)
+        {
+            cv::Vec3f p = points3D[i];
+            double zc = rm.at<double>(2, 0) * p[0] + rm.at<double>(2, 1) * p[1] + rm.at<double>(2, 2) * p[2] + tz;
+            double xu = (rm.at<double>(0, 0) * p[0] + rm.at<double>(0, 1) * p[1] + rm.at<double>(0, 2) * p[2] + tx) / zc;
+            double yu = (rm.at<double>(1, 0) * p[0] + rm.at<double>(1, 1) * p[1] + rm.at<double>(1, 2) * p[2] + ty) / zc;
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs + k2 * rs * rs) + 2 * p1 * xu * yu + p2 * (rs + 2 * xu * xu) + s1 * rs;
+            double y_pie = yu * (1 + k1 * rs + k2 * rs * rs) + p1 * (rs + 2 * yu * yu) + 2 * p2 * xu * yu + s3 * rs;
+
+            double u = m_Parameters.kx * x_pie + m_Parameters.u0;
+            double v = m_Parameters.ky * y_pie + m_Parameters.v0;
+
+            value += (u - points2D[i][0]) * (u - points2D[i][0]) + (v - points2D[i][1]) * (v - points2D[i][1]);
+        }
+        return value;
+    };
+
+    std::array<double, 3> angles = RotationMat2Angle(m_Parameters.rotation_matrix);
+    ppx::MatrixS<12, 1> x0 = {
+        angles[0],
+        angles[1],
+        angles[2],
+        m_Parameters.translation_vector.at<double>(0,0),
+        m_Parameters.translation_vector.at<double>(1,0),
+        m_Parameters.translation_vector.at<double>(2,0),
+        m_Parameters.k1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+
+    m_Parameters.rotation_matrix = Angle2RotationMat(res.x[0], res.x[1], res.x[2]);
+    m_Parameters.translation_vector = (cv::Mat_<double>(3, 1) << res.x[3], res.x[4], res.x[5]);
+    m_Parameters.k1 = res.x[6];
+    m_Parameters.k2 = res.x[7];
+    m_Parameters.p1 = res.x[8];
+    m_Parameters.p2 = res.x[9];
+    m_Parameters.s1 = res.x[10];
+    m_Parameters.s3 = res.x[11];
+}
+
+
+void TsaiCalibration::RefineIntermalParameters(const std::vector<cv::Vec3d>& points3D, const std::vector<cv::Vec2d>& points2D)
+{
+    auto r1 = m_Parameters.rotation_matrix.rowRange(0, 1);
+    auto r2 = m_Parameters.rotation_matrix.rowRange(1, 2);
+    auto r3 = m_Parameters.rotation_matrix.rowRange(2, 3);
+    std::vector<double> r1p, r2p, r3p;
+    std::transform(points3D.begin(), points3D.end(), std::back_inserter(r1p),
+        [=](auto p) {return r1.at<double>(0, 0) * p[0] + r1.at<double>(0, 1) * p[1] + r1.at<double>(0, 2) * p[2]; });
+    std::transform(points3D.begin(), points3D.end(), std::back_inserter(r2p),
+        [=](auto p) {return r2.at<double>(0, 0) * p[0] + r2.at<double>(0, 1) * p[1] + r2.at<double>(0, 2) * p[2]; });
+    std::transform(points3D.begin(), points3D.end(), std::back_inserter(r3p),
+        [=](auto p) {return r3.at<double>(0, 0) * p[0] + r3.at<double>(0, 1) * p[1] + r3.at<double>(0, 2) * p[2]; });
+
+
+    auto obj = [=](ppx::MatrixS<4, 1> x) {
+        double dx = x[0];
+        double dy = x[1];
+        double u0 = x[2];
+        double v0 = x[3];
+
+        double value = 0.0;
+
+        double tx = m_Parameters.translation_vector.at<double>(0, 0);
+        double ty = m_Parameters.translation_vector.at<double>(1, 0);
+        double tz = m_Parameters.translation_vector.at<double>(2, 0);
+
+        double k1 = m_Parameters.k1;
+        double k2 = m_Parameters.k2;
+
+        double p1 = m_Parameters.p1;
+        double p2 = m_Parameters.p2;
+
+        double s1 = m_Parameters.s1;
+        double s3 = m_Parameters.s3;
+
+        for (size_t i = 0; i < points3D.size(); i++)
+        {
+            double xu = (r1p[i] + tx) / (r3p[i] + tz);
+            double yu = (r2p[i] + ty) / (r3p[i] + tz);
+
+            double rs = xu * xu + yu * yu;
+
+            double x_pie = xu * (1 + k1 * rs + k2 * rs * rs) + 2 * p1 * xu * yu + p2 * (rs + 2 * xu * xu) + s1 * rs;
+            double y_pie = yu * (1 + k1 * rs + k2 * rs * rs) + p1 * (rs + 2 * yu * yu) + 2 * p2 * xu * yu + s3 * rs;
+
+            double u = m_Parameters.f / dx * x_pie + u0;
+            double v = m_Parameters.f / dy * y_pie + v0;
+
+            value += hypot(u - points2D[i][0], v - points2D[i][1]);
+        }
+        return value;
+    };
+
+    ppx::MatrixS<4, 1> x0 = {
+        (double)m_Parameters.image_spacing[0],
+        (double)m_Parameters.image_spacing[1],
+        m_Parameters.u0,
+        m_Parameters.v0
+    };
+    auto res = ppx::fminunc<ppx::Optimization::Powell>(obj, x0);
+    std::cout << res.x.T() << std::endl;
+
+    m_Parameters.image_spacing[0] = res.x[0];
+    m_Parameters.image_spacing[1] = res.x[1];
+
+    m_Parameters.kx = m_Parameters.f / res.x[0];
+    m_Parameters.ky = m_Parameters.f / res.x[1];
+
+    m_Parameters.u0 = res.x[2];
+    m_Parameters.v0 = res.x[3];
+}
+
+
+void TsaiCalibration::SetImageSize(const int& width, const int& height)
+{
+    m_Parameters.image_width = width;
+    m_Parameters.image_height = height;
+}
+
+
+
+double TsaiCalibration::GetProjectionError()
+{
+    // distortion coeff
+    cv::Mat dist = (cv::Mat_<double>(12, 1) << m_Parameters.k1, m_Parameters.k2,    // k1,k2
+        m_Parameters.p1, m_Parameters.p2,                                           // p1,p2
+        0, 0, 0, 0,                                                                 // k3,k4,k5,k6
+        m_Parameters.s1, 0, m_Parameters.s3, 0);                                    // s1,s2,s3,s4
+    // camera matrix from calibration
+    cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << m_Parameters.kx, 0, m_Parameters.u0,
+        0, m_Parameters.ky, m_Parameters.v0, 0, 0, 1); 
+    // standard camera matrix without optical center offset
+    cv::Mat camera_matrix_undistort = (cv::Mat_<double>(3, 3) << m_Parameters.kx, 0, (m_Parameters.image_width - 1.0) / 2,
+        0, m_Parameters.ky, (m_Parameters.image_height - 1.0) / 2, 0, 0, 1);
+    // undistortion the points by calibration
+    std::vector<cv::Vec2d> points2D_undistorted;
+    cv::undistortPoints(m_Points2D, points2D_undistorted,
+        camera_matrix, dist, cv::Mat(),
+        camera_matrix_undistort);
+
+    // project 3d points with external parameter but standard camera matrix
+    auto angles = RotationMat2Angle(m_Parameters.rotation_matrix);
+    cv::Mat rvec = (cv::Mat_<double>(3, 1) << angles[0], angles[1], angles[2]);
+
+    std::vector<cv::Vec2d> projected_points2D_undistort;
+    cv::projectPoints(m_Points3D, rvec, m_Parameters.translation_vector,    // external parameter from calibration
+        camera_matrix_undistort, cv::Mat(),                                 // project points in standard camera matrix
+        projected_points2D_undistort);
+
+
+    std::vector<double> errors;
+
+    //cv::Mat preview(1024, 1024, CV_8UC3);
+    for (size_t i = 0; i < points2D_undistorted.size(); i++)
+    {
+        //cv::circle(preview, cv::Point(projected_points2D_undistort[i]), 10, cv::Scalar(0, 0, 255), -1);
+        //cv::circle(preview, cv::Point(points2D_undistorted[i]), 10, cv::Scalar(255, 0, 255), 2);
+        errors.push_back(cv::norm(projected_points2D_undistort[i] - points2D_undistorted[i]));
+    }
+    //cv::imshow("preview2", preview);
+    //cv::waitKey(0);
+
+    double maxe = *std::max_element(errors.begin(), errors.end());
+    double mine = *std::min_element(errors.begin(), errors.end());
+    double meane = std::reduce(errors.begin(), errors.end()) / errors.size();
+    std::cout << "Max Projection Error = " << maxe << std::endl;
+    std::cout << "Min Projection Error = " << mine << std::endl;
+    std::cout << "Mean Projection Error = " << meane << std::endl;
+
+    return meane;
+}
+
+cv::Mat TsaiCalibration::UndistortImage(const cv::Mat& src)
+{
+    // distortion coeff
+    cv::Mat dist = (cv::Mat_<double>(12, 1) << m_Parameters.k1, m_Parameters.k2,    // k1,k2
+        m_Parameters.p1, m_Parameters.p2,                                           // p1,p2
+        0, 0, 0, 0,                                                                 // k3,k4,k5,k6
+        m_Parameters.s1, 0, m_Parameters.s3, 0);                                    // s1,s2,s3,s4
+    // camera matrix from calibration
+    cv::Mat camera_matrix = (cv::Mat_<double>(3, 3) << m_Parameters.kx, 0, m_Parameters.u0,
+        0, m_Parameters.ky, m_Parameters.v0, 0, 0, 1);
+    // standard camera matrix without optical center offset
+    cv::Mat camera_matrix_undistort = (cv::Mat_<double>(3, 3) << m_Parameters.kx, 0, (m_Parameters.image_width - 1.0) / 2,
+        0, m_Parameters.ky, (m_Parameters.image_height - 1.0) / 2, 0, 0, 1);
+
+    cv::Size image_size(m_Parameters.image_width, m_Parameters.image_height);
+    cv::Mat dst;
+    cv::undistort(src, dst, camera_matrix, dist, camera_matrix);
+    //cv::Mat map1, map2;
+    //cv::initUndistortRectifyMap(camera_matrix, dist, cv::Mat(), camera_matrix, image_size, CV_32FC1, map1, map2);
+    //cv::remap(src, dst, map1, map2, cv::INTER_LINEAR);
+    return dst;
+}

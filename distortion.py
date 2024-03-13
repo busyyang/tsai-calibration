@@ -65,7 +65,6 @@ def calibrateDistorted(settings, points, image):
     yOffset = settings['yOffset']
     numLowDistortionPoints = settings['minLowDistortionPoints']
     numHighDistortionPoints = settings['numHighDistortionPoints']
-    passes = settings['passes']
 
     points = pixelToSensor(points, resolution, pixelSize)
 
@@ -131,7 +130,7 @@ def calibrateDistorted(settings, points, image):
         r2 = xc * xc + yc * yc
         vx = xc * (1 + k1 * r2) * (np.sum(R[2, :] * Pw, axis=1) + Tz) - f * (np.sum(R[0, :] * Pw, axis=1) + Tx)
         vy = yc * (1 + k1 * r2) * (np.sum(R[2, :] * Pw, axis=1) + Tz) - f * (np.sum(R[1, :] * Pw, axis=1) + Ty)
-        value = np.linalg.norm(vx) + np.linalg.norm(vy)
+        value = np.sum(np.power(vx,2) + np.power(vy,2))
         print(f'value = {value},k1 = {k1}, f = {f}, Tz = {Tz}')
         return value
 
